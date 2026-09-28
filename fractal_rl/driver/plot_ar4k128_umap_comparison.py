@@ -47,7 +47,35 @@ def build_umap():
     plt.close(figure)
 
 
+def build_umap_evolution():
+    """Show early, middle, and final held-out UMAP trajectories per encoder."""
+    stages = (2000, 10000, 20000)
+    for run, label, encoder in ARMS:
+        figure, axes = plt.subplots(
+            len(stages), 1, figsize=(12.8, 12.2), constrained_layout=True
+        )
+        for axis, step in zip(axes, stages):
+            image = mpimg.imread(
+                source(run, f'dense_latent_umap_sac_{step:09d}_{encoder}_seed100001.png')
+            )
+            axis.imshow(image)
+            axis.set(title=f'{label} - {step // 1000}k decisions', xticks=[], yticks=[])
+        figure.suptitle(
+            'Held-out UMAP trajectory evolution: 2k, 10k, and 20k checkpoints',
+            fontsize=15,
+        )
+        stem = run.removeprefix('ar4k128_') + '_' + encoder
+        figure.savefig(
+            OUT / f'k128_umap_evolution_{stem}.png',
+            dpi=180,
+            facecolor='white',
+            transparent=False,
+        )
+        plt.close(figure)
+
+
 if __name__ == '__main__':
     OUT.mkdir(parents=True, exist_ok=True)
     build_rgb()
     build_umap()
+    build_umap_evolution()
