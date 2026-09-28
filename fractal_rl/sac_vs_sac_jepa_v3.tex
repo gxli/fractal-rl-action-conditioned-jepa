@@ -1,0 +1,608 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.72in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{microtype}
+\title{SAC versus action-conditioned JEPA on the fractal terrain task}
+\author{}
+\date{RTX 3090 runs, September 20, 2026}
+\begin{document}
+\maketitle
+
+\section*{Question and result}
+All runs use the same centered-Gaussian squared-potential terrain, random
+starts, $P_{\max}=6$ longitudinal power cap, 16 environments, held-out terrain
+seeds, and 10,000-transition budget. SAC alone is the strongest observed
+controller. The normalized, action-conditioned JEPA branch is mechanically
+valid---it beats shuffled-action and identity diagnostics---but still reduces
+held-out speed at this budget.
+
+\begin{center}
+\small
+\begin{tabular}{p{1.6in}ccp{2.0in}}
+\toprule
+Run & Held-out speed at 10k & Difference from SAC & Status \\
+\midrule
+SAC-only & $1.655\pm0.056$ & --- & baseline \\
+SAC+JEPA, old MSE target & $1.278\pm0.042$ & $-22.8\%$ & superseded cadence/scale safeguards \\
+SAC+JEPA, corrected MSE & $1.403\pm0.020$ & $-15.2\%$ & variance floor and slow EMA \\
+SAC+JEPA, cosine predictive loss & $1.188$ & $-28.2\%$ & scale-normalized diagnostic run \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{Full corrected SAC+JEPA loss}
+For a replayed transition $(o_t,a_t,o_{t+1})$, the actor has online encoder
+$z_t=f_\theta(o_t)$, EMA target $\bar z_{t+1}=\bar f(o_{t+1})$, and predictor
+$q_\psi$. The optimized actor objective is
+\begin{equation}
+\begin{aligned}
+\mathcal L_{\rm actor}={}&\mathbb E\!\left[\alpha\log\pi(a|o)-\min(Q_1(o,a),Q_2(o,a))\right]\\
+&+\lambda\left(1-\cos\!\left(q_\psi([z_t,a_t]),\operatorname{sg}[\bar z_{t+1}]\right)\right)\\
+&+c_{\rm var}\frac{1}{d}\sum_{j=1}^d\max\!\left(0,s_{\rm min}-\operatorname{std}_B(z_{:,j})\right).
+\end{aligned}
+\end{equation}
+The cosine loss is scale-free; the variance floor prevents a zero-variance
+representation. The final run uses $\lambda=0.025$, $c_{\rm var}=0.01$,
+$s_{\rm min}=0.1$, and updates the EMA target by 0.01 every 64 collected
+transitions. Logged diagnostics include the weighted JEPA and variance terms,
+action-shuffled loss, identity baseline, and embedding spread.
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{output/pdf/sac_only_learning_curve.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/learning_curve.png}
+\caption{Performance curves. Left: SAC-only. Right: normalized cosine SAC+JEPA.
+The right lower panel is the scale-free predictive loss.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/latent_umap_sac_000010000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/latent_umap_sac_000010000_seed100001.png}
+\caption{Endpoint terrain-overlay trajectories and UMAPs on the same held-out
+seed. Left: SAC-only. Right: normalized cosine SAC+JEPA.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/dynamics_history_sac_000010000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/dynamics_history_sac_000010000_seed100001.png}
+\caption{Full velocity, control, and acceleration diagnostics. Left: SAC-only.
+Right: normalized cosine SAC+JEPA.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/encoder_cka_matrix_seed100001.png}
+\caption{Encoder evolution across the five saved checkpoints, measured by
+linear CKA on a common held-out inference trajectory.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\caption{Checkpoint-pair latent matrix on the shared deterministic held-out
+trajectory. Each cell jointly embeds the row and counterpart encoder states
+(blue/orange); diagonal cells are self-comparisons. Left: SAC-only. Right:
+normalized cosine SAC+JEPA.}
+\end{figure}
+
+\section*{Interpretation}
+The cosine replacement fixes the earlier loss-scale failure: the predictive
+term is no longer numerically negligible relative to the variance term, and
+the shuffled-action loss exceeds the real-action loss ($0.0099$ versus $0.0038$
+at 10k). Thus the predictor uses actions. Nonetheless, performance is lower
+than SAC alone. At this horizon and budget, the evidence favors SAC-only;
+multi-step targets and matched multi-seed sweeps remain the next JEPA test.
+
+\clearpage
+\section*{V2: five-times-longer SAC+JEPA run (50k transitions)}
+V2 repeats the corrected cosine SAC+JEPA configuration from V1 on the RTX
+3090, with the same terrain split, power limit, random starts, and held-out
+evaluation seeds. Only the transition budget changes: 10k to 50k. Checkpoints
+are saved every 10k, so all representation plots compare five within-run
+checkpoints on the same held-out deterministic trajectory.
+
+\begin{center}
+\small
+\begin{tabular}{lcc}
+\toprule
+Run & Held-out speed & Interpretation \\
+\midrule
+V1 cosine SAC+JEPA, 10k & $1.188$ & early-budget endpoint \\
+V2 cosine SAC+JEPA, 50k & $2.954\pm0.049$ & continued improvement, plateau after about 18k \\
+Matched SAC-only, 50k & running & required before asserting relative slowness \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The auxiliary branch remains active in V2: at 10,240 transitions its real
+action-conditioned cosine loss is $0.0045$ versus $0.0101$ with actions
+shuffled. The gap narrows late in training, as the controller and observations
+become more predictable. Thus V2 establishes that the JEPA controller keeps
+learning with a larger budget, but it does \emph{not} yet prove that it is
+slower than SAC: that requires the matched 50k SAC-only control now in flight.
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.92\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/learning_curve.png}
+\caption{V2 held-out performance and auxiliary diagnostics across 50k
+transitions. The held-out speed rises sharply after 10k and stabilizes near
+2.95 from approximately 18k onward.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/latent_umap_sac_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/dynamics_history_sac_000050000_seed100001.png}
+\caption{V2 endpoint deterministic inference on held-out seed 100001. Left:
+terrain-overlay trajectory and encoder UMAP. Right: velocity, input, field,
+damping, and net acceleration histories.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\caption{V2 encoder evolution across the five 10k-spaced checkpoints on one
+shared held-out trajectory. Left: linear CKA. Right: pairwise joint UMAP
+matrix (blue/orange are the two checkpoint encoders in each cell).}
+\end{figure}
+
+\clearpage
+\section*{V2 completion: matched 50k SAC-only control}
+The control mentioned above has now completed under the same 50k transition
+budget, terrain split, power limit, random-start protocol, evaluation seeds,
+and checkpoint schedule. This is the valid comparison for the question
+``does JEPA merely learn more slowly?''
+
+\begin{center}
+\small
+\begin{tabular}{lccc}
+\toprule
+Transitions & SAC-only & SAC+JEPA & JEPA minus SAC \\
+\midrule
+10,240 & $1.426$ & $1.402$ & $-0.024$ \\
+12,288 & $2.258$ & $2.433$ & $+0.175$ \\
+16,384 & $2.836$ & $2.844$ & $+0.008$ \\
+50,000 & $2.952\pm0.030$ & $2.954\pm0.049$ & $+0.003$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=.88\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/matched_sac_vs_jepa_50k.png}
+\caption{Direct matched 50k held-out comparison. The curves cross during the
+early transient and are nearly identical from about 16k onward. Shading is the
+held-out standard deviation across the fixed evaluation seeds.}
+\end{figure}
+
+\noindent\textbf{Conclusion.} In this one matched seed/configuration pair,
+the corrected cosine SAC+JEPA branch is neither persistently worse nor
+detectably slower than SAC-only. Its final mean differs by $0.003$ speed
+($0.09\%$), far smaller than the reported evaluation spread. This establishes
+convergence at 50k; it does not establish a general JEPA benefit. Matched
+multi-seed replicates are required for that claim.
+
+\clearpage
+\section*{V2 visual companion: SAC-only versus SAC+JEPA}
+These panels are the corresponding standard inference artifacts from the two
+matched 50k endpoints. Both use the same held-out terrain seed (100001) and
+the same deterministic-inference protocol; only the learned controller and
+encoder differ.
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_50k_control_v2/plots/latent_umap_sac_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/latent_umap_sac_000050000_seed100001.png}
+\caption{Matched endpoint terrain-overlay trajectory and latent UMAP. Left:
+SAC-only. Right: SAC+JEPA. Point colour maps the two UMAP coordinates back to
+the physical trajectory.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_50k_control_v2/plots/dynamics_history_sac_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/dynamics_history_sac_000050000_seed100001.png}
+\caption{Matched endpoint velocity and acceleration histories. Left:
+SAC-only. Right: SAC+JEPA. Each panel contains speed and latent velocity,
+actions, and signed input/potential/damping/net acceleration components.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_50k_control_v2/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/encoder_cka_matrix_seed100001.png}
+\caption{Within-run representation evolution on a common held-out trajectory.
+Left: SAC-only. Right: SAC+JEPA. Each 5 by 5 matrix is linear CKA across the
+10k, 20k, 30k, 40k, and 50k checkpoints.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_50k_control_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\caption{Pairwise joint UMAP trajectory matrices for the same checkpoints.
+Blue and orange are the row and counterpart encoders evaluated on identical
+held-out inference states. Left: SAC-only. Right: SAC+JEPA.}
+\end{figure}
+
+\clearpage
+\section*{Post-run diagnostic fidelity correction}
+The original V2 run is unchanged. Its speed curve, endpoint evaluations, and
+inference/representation artifacts remain valid. Two reported auxiliary
+details are corrected for future runs: (i) the cosine-prediction panel is now
+labelled ``cosine distance ($1-\cos$)'', not MSE; and (ii) training now logs
+the mean of every replay update since the prior evaluation, rather than the
+final minibatch alone. Consequently, the V2 single-checkpoint real-action
+versus shuffled-action loss values are diagnostic snapshots, not evidence of
+a statistically significant action effect. The corrected identity baseline
+also compares target-encoder embeddings of $o_t$ and $o_{t+1}$, isolating
+temporal predictability from EMA lag. These corrections do not change the
+matched 50k performance conclusion; they improve fidelity for subsequent
+JEPA ablations.
+
+\clearpage
+\section*{V3: boundary-safe eight-step JEPA with inverse dynamics}
+V3 changes the auxiliary task, not the SAC environment or reward. Replay now
+marks every episode boundary (including time-limit truncations), so an
+eight-action window cannot splice unrelated reset terrains. The predictor
+receives $[z_t,a_t,\ldots,a_{t+7}]$ and targets the EMA encoding of
+$o_{t+8}$. An inverse head predicts $a_t$ from the two latent endpoints. The
+optimized auxiliary terms are
+\[
+\lambda\,[1-\cos(q([z_t,a_{t:t+7}]),\operatorname{sg}[\bar z_{t+8}])]
++\lambda_{\rm inv}\,\|g(z_t,\bar z_{t+8})-a_t\|_2^2,
+\]
+with $\lambda=\lambda_{\rm inv}=0.025$. V3 also logs the interval-mean
+real/shuffled ratio, rather than a final-minibatch snapshot.
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+Run & Held-out speed at 10k & Real/shuffled ratio \\
+\midrule
+V2 cosine SAC+JEPA & $1.188$ & late-run ratio approached 1 \\
+V3 K=8 + inverse SAC+JEPA & $0.863$ & $0.204$ \\
+\bottomrule
+\end{tabular}\end{center}
+
+V3 clears the action-conditioning acceptance test: the shuffled predictor is
+substantially worse than the real-action predictor at 10k. It does not yet
+improve early control performance, so this result isolates a repaired
+representation objective rather than a performance win.
+
+\begin{figure}[p]\centering
+\includegraphics[width=.88\linewidth]{dumps/sac_jepa_v3_10k_corrected/plots/learning_curve.png}
+\caption{V3 learning curve and auxiliary diagnostic over 10k transitions.}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_v3_10k_corrected/plots/latent_umap_sac_000010000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_v3_10k_corrected/plots/dynamics_history_sac_000010000_seed100001.png}
+\caption{V3 endpoint held-out terrain/UMAP trajectory (left) and full physical dynamics history (right).}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_v3_10k_corrected/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_v3_10k_corrected/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\caption{V3 encoder evolution across the five checkpoints: CKA (left) and pairwise joint UMAP trajectory matrix (right).}
+\end{figure}
+
+\clearpage
+\section*{V3 completion: matched 50k objective test (September 21, 2026)}
+The preceding 10k V3 result is retained as a source-verified integration
+check, but it is not a fair comparison with the 50k V2 pair.  This appended
+run uses the same 50,000-transition budget, five checkpoints (10k through
+50k), RTX 3090 analysis flush, terrain split, power cap, and SAC settings as
+the V2 control.  The only changed learning component is the boundary-safe
+$K=8$ action-sequence objective with the inverse-dynamics term described
+above.  In particular, time-limit truncations are sequence boundaries, while
+they remain bootstrap-able for Bellman learning.
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+Run & Transitions & held-out mean speed & final action diagnostic \\
+\midrule
+SAC-only V2 control & 50k & $2.952\pm0.030$ & --- \\
+SAC+JEPA V2, $K=1$ cosine & 50k & $2.954\pm0.049$ & late ratio near 1 \\
+SAC+JEPA V3, $K=8$ + inverse & 50k & $2.928\pm0.032$ & ratio $0.684$ \\
+\bottomrule
+\end{tabular}\end{center}
+
+V3 finishes $0.024$ below SAC-only (0.8\%) and $0.027$ below the V2 cosine
+arm (0.9\%).  This single matched run therefore does not show a speed benefit
+from the repaired auxiliary task.  It does establish the intended
+action-conditioning evidence at the endpoint: real action sequences have
+cosine loss $0.0306$ versus $0.0448$ for block-shuffled sequences (ratio
+$0.684$), while inverse-action MSE is $0.151$.  The ratio nevertheless rises
+close to one late in training before falling again; it is not persistently in
+the desired band.  The honest conclusion is that $K=8$ plus inverse dynamics
+repairs the previously trivial one-step diagnostic, but needs a multi-seed,
+gradient-balanced coefficient sweep before it can be claimed to help control.
+
+\begin{figure}[p]\centering
+\includegraphics[width=.90\linewidth]{dumps/sac_jepa_v3_50k/plots/v3_action_conditioning_diagnostics.png}
+\caption{Matched 50k V3 action-conditioning diagnostics.  Top: held-out
+speed. Middle: real $K=8$ action sequences versus block-shuffled sequences.
+Bottom: their ratio and endpoint inverse-dynamics MSE.}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_v3_50k/plots/latent_umap_sac_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_v3_50k/plots/dynamics_history_sac_000050000_seed100001.png}
+\caption{Matched V3 50k endpoint on held-out seed 100001.  Left: periodic
+potential, deterministic trajectory, and encoder UMAP. Right: speed, latent
+velocity, actions, and signed acceleration components.}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_v3_50k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_v3_50k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\caption{Matched V3 representation evolution across checkpoints 10k--50k:
+linear CKA (left) and pairwise joint UMAP trajectories on one shared held-out
+probe (right).}
+\end{figure}
+
+\clearpage
+\section*{Retained PPO+JEPA 10k evidence}
+For completeness, this report now includes the existing PPO+JEPA 3090 run,
+which was omitted from the SAC-focused V3 report.  It uses the earlier
+one-step MSE objective
+\[
+ \|q_\psi([f_\theta(o_t),a_t])-\operatorname{sg}[\bar f(o_{t+1})]\|_2^2
+\]
+with coefficient $0.1$, so it is not directly comparable to the V3 $K=8$
+cosine-plus-inverse objective.  Its recorded 10k held-out result is
+$0.676\pm0.105$, compared with $0.818\pm0.116$ for the PPO-only reference.
+Thus the earlier PPO auxiliary branch was active but did not improve speed in
+that short single-run comparison.  Its retained artifacts include plots but
+not the original checkpoints or metrics CSV; the numbers are preserved here
+as historical run evidence rather than recomputed claims.
+
+\begin{figure}[p]\centering
+\includegraphics[width=.49\linewidth]{dumps/ppo_jepa_10k/plots/learning_curve.png}
+\includegraphics[width=.49\linewidth]{dumps/ppo_jepa_10k/plots/episode_diagnostics_ppo_000010000_seed100001.png}
+\caption{Retained PPO+JEPA 10k learning curve (left) and complete deterministic
+episode diagnostic with terrain overlay, controls, and acceleration traces
+(right).}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.36\linewidth]{dumps/ppo_jepa_10k/plots/latent_umap_ppo_000010000_seed100001.png}
+\includegraphics[width=.36\linewidth]{dumps/ppo_jepa_10k/plots/encoder_cka_matrix_seed100001.png}
+\par\vspace{0.35em}
+\includegraphics[width=.72\linewidth]{dumps/ppo_jepa_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\caption{Retained PPO+JEPA inference and representation artifacts: endpoint
+terrain/UMAP correspondence (upper left), CKA across saved checkpoints (upper
+right), and pairwise UMAP trajectory matrix (bottom).}
+\end{figure}
+
+\clearpage
+\section*{Matched PPO-only versus PPO+JEPA at 50k (September 21, 2026)}
+This section replaces neither the retained 10k PPO+JEPA evidence nor any SAC
+result.  It appends the previously missing fair PPO comparison: two new,
+source-verified RTX 3090 runs with identical centered-Gaussian terrain,
+random tiled starts, $P_{\max}=6$, 16 environments, seed 123, held-out seeds
+100001--100004, 50,000 training transitions, evaluations every 2,048
+transitions, and checkpoints at 10k--50k.  PPO+JEPA alone enables the
+one-step cosine action-conditioned auxiliary loss with coefficient $0.1$ and
+EMA update fraction $0.01$; it is the current PPO branch, not the $K=8$ SAC
+V3 objective.
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+Run & held-out speed at 50k & JEPA loss at 50k & difference \\
+\midrule
+PPO-only & $1.658\pm0.268$ & --- & --- \\
+PPO+JEPA (cosine, $K=1$) & $1.717\pm0.219$ & $0.00439$ & $+0.058$ ($+3.5\%$) \\
+\bottomrule
+\end{tabular}\end{center}
+
+The auxiliary PPO run is directionally better in this one matched run.  The
+learning curve is also above the control for most of training after the first
+few evaluations.  This is evidence that the current PPO+JEPA branch can help
+velocity under this protocol, but the held-out standard deviations overlap and
+one seed is not a performance claim.  In contrast, the matched SAC runs reach
+about $2.95$ speed and remain the strongest controller architecture tested so
+far.  The next necessary experiment is a multi-seed PPO replication, followed
+by porting the boundary-safe $K=8$ objective to PPO rather than transferring
+the SAC V3 conclusion by analogy.
+
+\begin{figure}[p]\centering
+\includegraphics[width=.90\linewidth]{output/pdf/ppo_vs_ppo_jepa_50k_v3.png}
+\caption{Matched 50k PPO learning curves.  Shading is the standard deviation
+over the four held-out terrain seeds at each deterministic evaluation.}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.49\linewidth]{dumps/ppo_50k_control_v3/plots/latent_umap_ppo_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/ppo_jepa_50k_v3/plots/latent_umap_ppo_000050000_seed100001.png}
+\caption{Endpoint terrain-overlay trajectory and UMAP for matched 50k PPO-only
+(left) and PPO+JEPA (right) deterministic inference on held-out seed 100001.}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.49\linewidth]{dumps/ppo_50k_control_v3/plots/dynamics_history_ppo_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/ppo_jepa_50k_v3/plots/dynamics_history_ppo_000050000_seed100001.png}
+\caption{Matched 50k velocity, control, and acceleration histories for PPO-only
+(left) and PPO+JEPA (right).}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.49\linewidth]{dumps/ppo_50k_control_v3/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/ppo_jepa_50k_v3/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/ppo_50k_control_v3/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/ppo_jepa_50k_v3/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\caption{Representation evolution across the five matched PPO checkpoints:
+CKA top row and pairwise UMAP trajectory matrices bottom row; PPO-only left,
+PPO+JEPA right.}
+\end{figure}
+
+\clearpage
+\section*{Spectral-slope transfer for SAC versus SAC+JEPA (September 21, 2026)}
+This appended experiment tests whether the SAC comparison depends on the
+pink-noise spectral exponent $\alpha$.  The original matched 50k SAC and
+SAC+JEPA V2-cosine checkpoints were trained at $\alpha=3$.  Each endpoint was
+then used only as an initialization for a fresh 20,000-transition adaptation
+run at $\alpha=2$ (more high-frequency terrain) and $\alpha=4$ (more
+low-frequency terrain).  Replay buffers, optimizers, entropy temperature, and
+live environments were deliberately fresh after the terrain shift; this is
+fine-tuning transfer, not an exact training resume.  Both arms retain the
+same centered Gaussian-squared potential, random tiled starts, power cap,
+seed, and four held-out terrain seeds as the original SAC comparison.
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+Spectral exponent & SAC-only speed & SAC+JEPA speed & SAC+JEPA minus SAC \\
+\midrule
+$\alpha=2$, after 20k transfer & $2.925\pm0.024$ & $2.876\pm0.030$ & $-0.049$ \\
+$\alpha=3$, original 50k endpoint & $2.952\pm0.030$ & $2.954\pm0.049$ & $+0.003$ \\
+$\alpha=4$, after 20k transfer & $2.841\pm0.119$ & $2.878\pm0.085$ & $+0.037$ \\
+\bottomrule
+\end{tabular}\end{center}
+
+The overlaid trajectories show fast recovery in every transfer arm.  At
+$\alpha=2$, SAC-only ends modestly higher; at $\alpha=4$, SAC+JEPA ends
+modestly higher.  These endpoint differences are smaller than, or comparable
+to, the across-held-out-terrain variability, and each condition is a single
+training seed.  Consequently the correct conclusion is robustness rather
+than a JEPA advantage: changing spectral slope did not expose a consistent
+SAC+JEPA benefit or regression.  The matched $\alpha=3$ result remains the
+primary in-distribution comparison, while this section establishes that both
+controllers adapt back toward the $\sim2.95$ speed regime after either slope
+shift.
+
+\begin{figure}[p]\centering
+\includegraphics[width=.96\linewidth]{dumps/plots/sac_sac_jepa_spectral_transfer_alpha_2_4.png}
+\caption{SAC-only and SAC+JEPA transfer curves after changing the pink-noise
+spectral exponent.  Solid lines and shading are held-out mean speed and
+standard deviation over four terrain seeds during 20k-transition adaptation.
+Dashed lines are the original $\alpha=3$ 50k endpoints, included as a
+reference rather than as a matched transfer evaluation.}
+\end{figure}
+
+\clearpage
+\section*{Controlled start-location replication (September 22, 2026)}
+This section appends a stronger check of the preceding spectral-transfer
+comparison.  For every $\alpha\in\{2,3,4\}$ and each controller, the
+deterministic final checkpoint was evaluated on the same 16 uniformly sampled
+locations in each of four held-out terrain tiles (64 episodes per controller).
+Within a terrain tile, the reset seed, initial heading, and initial speed were
+held fixed, so the only varied initial condition was position.  This protocol
+therefore isolates sensitivity to where the agent begins rather than mixing
+location variation with a different launch velocity.  The $\alpha=2$ and
+$\alpha=4$ controllers were initialized from their $\alpha=3$ 50k weights
+and then fine-tuned for 20k transitions with \emph{no encoder freezing};
+the actor encoder, critics, and target critics all remained trainable, while
+the optimizer and replay state were newly initialized.
+
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+Spectral exponent & SAC-only speed & SAC+JEPA speed & SAC+JEPA minus SAC \\
+\midrule
+$\alpha=2$ & $2.918\pm0.048$ & $2.882\pm0.040$ & $-0.036$ \\
+$\alpha=3$ & $2.991\pm0.072$ & $2.995\pm0.075$ & $+0.004$ \\
+$\alpha=4$ & $3.061\pm0.139$ & $3.027\pm0.140$ & $-0.034$ \\
+\bottomrule
+\end{tabular}\end{center}
+
+This replication changes the practical verdict.  Across common start
+locations, SAC-only is higher at both shifted slopes, while the
+in-distribution pair is effectively tied.  The $\alpha=2$ and $\alpha=4$
+differences are modest relative to episode variation, so they do not prove a
+large regression, but neither do they support better JEPA generalization.
+The appropriate conclusion is: the current SAC+JEPA auxiliary branch matches
+SAC near the training slope but has not demonstrated a robust out-of-slope or
+out-of-location benefit.
+
+\begin{figure}[p]\centering
+\includegraphics[width=.93\linewidth]{dumps/spectral_random_start_evaluation/random_start_speed_distribution.png}
+\caption{Distribution of deterministic episode mean speeds across 64 shared
+start-location evaluations for each spectral exponent and controller.  Green
+triangles are means; boxes summarize location and terrain variation.}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[height=.93\textheight]{dumps/spectral_random_start_evaluation/random_start_trajectory_panels.png}
+\caption{Four representative shared-location deterministic trajectories per
+controller, overlaid on the corresponding periodic potential.  Each adjacent
+SAC/SAC+JEPA pair uses identical first four starts on the same held-out tile.}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.96\linewidth]{dumps/plots/sac_sac_jepa_spectral_loss_curves.png}
+\caption{All logged SAC loss and temperature curves for the original
+$\alpha=3$ runs and the $\alpha=2,4$ fine-tuning transfers.  The auxiliary
+distance is zero by construction in SAC-only arms.}
+\end{figure}
+
+\clearpage
+\section*{Frozen-encoder spectral transfer and encoder probes (September 25, 2026)}
+This appended comparison freezes the actor visual encoder and both independent
+critic visual encoders at the start of transfer.  Only the actor head, Q heads,
+temperature, and (where enabled) JEPA prediction heads adapt.  Thus the curves
+ask whether the learned representations are useful after a terrain-spectrum
+shift, rather than allowing the visual systems to relearn the new terrain.
+Vanilla SAC and the original cosine JEPA with a variance-floor regularizer were
+run for 50k transfer transitions; the four new regularizer arms were screening
+runs of 20k transitions, so their curves stop earlier and are not a matched
+50k ranking.
+
+\begin{center}\small
+\begin{tabular}{lrrr}
+\toprule
+Regularizer & $\alpha=1.5$ & $\alpha=2$ & $\alpha=4$ \\
+\midrule
+VISReg (20k) & 2.549 & 2.198 & 3.066 \\
+KerJEPA Gaussian MMD (20k) & 2.762 & 2.594 & 2.902 \\
+SUSReg (20k) & 2.973 & 2.971 & 3.004 \\
+Spherical MMD (20k) & 3.000 & 2.908 & 2.995 \\
+\bottomrule
+\end{tabular}\end{center}
+
+The regularizer screening results are mixed: SUSReg is the most consistently
+strong at $\alpha=1.5$ and $\alpha=2$ within its 20k budget, while spherical
+MMD is strongest at $\alpha=1.5$.  These are single-seed outcomes and should
+be treated as candidates for matched 50k replications, not as a conclusive
+replacement for the original variance regularizer.
+
+\begin{figure}[p]\centering
+\includegraphics[width=.98\linewidth]{output/pdf/jepa_regularizer_transfer_curves.png}
+\caption{Dense held-out speed curves after frozen-encoder transfer to three
+spectral exponents.  Shading is the logged held-out standard deviation.  Blue
+and orange continue to 50k; the remaining four regularizer screens end at
+20k, which is why their right endpoints must not be read as matched 50k
+comparisons.}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.95\linewidth]{dumps/sac_frozen_alpha2_transfer/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\caption{Frozen vanilla-SAC transfer at $\alpha=2$: one deterministic held-out
+rollout over the potential landscape (upper left), followed by PCA and UMAP of
+the actor, Q1, and Q2 encoders.  Every encoder receives the same observation
+at each color-coded rollout step; the panels therefore show distinct learned
+representations rather than differences caused by separate trajectories.}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=.95\linewidth]{dumps/sac_jepa_actorcritic_frozen_alpha2_transfer/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\caption{Frozen actor-and-critic JEPA transfer at $\alpha=2$, evaluated on
+the identical held-out terrain seed and deterministic rollout protocol as the
+preceding vanilla panel.  Actor, Q1, and Q2 are probed separately before each
+action; this verifies that the report distinguishes the policy representation
+from both value representations.}
+\end{figure}
+
+\end{document}

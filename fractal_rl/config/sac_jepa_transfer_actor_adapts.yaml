@@ -1,0 +1,6 @@
+# Transfer ablation: preserve value encoders but let the policy representation
+# adapt to the shifted spectrum. Use only with independent actor/critic encoders.
+training:
+  freeze_encoder: false
+  freeze_actor_encoder: false
+  freeze_critic_encoder: true

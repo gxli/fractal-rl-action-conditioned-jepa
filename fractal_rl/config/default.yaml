@@ -11,6 +11,11 @@ terrain:
   # Normalize grad(phi) by this percentile of its magnitude, so the physics
   # potential_scale directly expresses a characteristic field acceleration.
   gradient_normalization_percentile: 95.0
+  # Optional full-field, inverted constrained-diffusion cache consumed by the
+  # SA-JEPA CDD ConvNeXt encoder.  Null preserves raw-potential observations.
+  cdd_scales: null
+  cdd_inverted: true
+  cdd_use_gpu: false
 physics:
   dt: 0.02
   substeps: 2
@@ -42,6 +47,9 @@ agent:
   steering_convention: right
   fov_size: 32
   fov_pixel_size: 1.0
+  # World frame keeps x/y velocity and terrain orientation observable. The
+  # legacy velocity frame collapses state to [speed, 0, speed, ...].
+  observation_frame: world
   velocity_scale: 6.0
   mass_scale: 1.0
 reward:
@@ -51,8 +59,12 @@ reward:
   action_change_penalty: 0.0
 environment:
   episode_steps: 2000
-  # Sample a fresh position uniformly over the periodic terrain tile at reset.
-  # Disable only for deterministic debugging from the tile centre.
+  # Number of stable physics updates per policy/replay transition.
+  action_repeat: 1
+  # Global minima remove the immediate downhill impulse and align starts for a
+  # terrain seed across SAC, SAC+JEPA, and SAC+JEPA+regularizer.
+  start_position_mode: global_minimum
+  # Legacy fallback used only when start_position_mode is absent.
   random_start_position: true
   num_parallel_envs: 16
   training_terrain_count: 64
@@ -81,9 +93,34 @@ training:
   # SAC+JEPA requires a positive coefficient via config/sac_jepa.yaml.
   jepa_variance_coef: 0.0
   jepa_variance_target: 0.1
+  # Distributional alternatives to the variance floor: variance | sigreg |
+  # visreg | kerjepa | susreg | spherical_mmd | none.  The legacy coefficient remains
+  # the fallback when jepa_regularizer_coef is null.
+  jepa_regularizer: variance
+  jepa_regularizer_coef: null
+  jepa_regularizer_slices: 64
+  jepa_regularizer_gamma: null
+  jepa_regularizer_quadrature: 32
+  # Optional action-negative JEPA term.  It makes the real action sequence
+  # outperform a shuffled one by this cosine-distance margin.
+  jepa_action_margin_coef: 0.0
+  jepa_action_margin: 0.0
   value_coef: 0.5
   max_grad_norm: 0.5
   seed: 123
+  # Optional actor/critic initialization for an explicitly labeled transfer
+  # run. Optimizer and replay state are deliberately fresh after a task shift.
+  init_checkpoint: null
+  # For transfer fine-tuning, preserve the actor visual representation while
+  # adapting its action head and the critics to the new terrain distribution.
+  freeze_encoder: false
+  # Share the actor's online encoder with critic value heads.  Critic features
+  # are detached, so TD errors cannot alter the actor/JEPA representation.
+  share_encoder_with_critic: false
+  # Train independent Q encoders with their own JEPA objectives against the
+  # corresponding Polyak target-critic encoders.  Mutually exclusive with
+  # share_encoder_with_critic.
+  critic_jepa_coef: 0.0
   checkpoint_interval: 100000
   evaluation_interval: 50000
 output:
@@ -97,3 +134,6 @@ analysis:
   pairwise_steps: 1000
   pairwise_limit: 5
   pairwise_plot_size: 5
+  # Dense fixed-state spatial probe for a directly comparable latent RGB map.
+  dense_map_resolution: 256
+  dense_map_batch_size: 256

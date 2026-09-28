@@ -1,0 +1,14 @@
+# Fair third arm: SAC + JEPA + the original variance regularizer.
+# Values intentionally match sac_jepa_v3.yaml; this named file makes the
+# three-arm protocol unambiguous in run commands and resolved configurations.
+training:
+  jepa_coef: 0.025
+  critic_jepa_coef: 0.025
+  jepa_horizon: 8
+  jepa_target_tau: 0.01
+  jepa_target_update_transitions: 64
+  jepa_inverse_coef: 0.0
+  jepa_action_margin_coef: 0.0
+  jepa_variance_coef: 0.01
+  jepa_regularizer: variance
+  jepa_regularizer_coef: 0.01

@@ -1,0 +1,3 @@
+# More low-frequency structure than the alpha=3 reference landscape.
+terrain:
+  spectral_exponent: 4.0

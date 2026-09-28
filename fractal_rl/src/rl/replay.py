@@ -38,20 +38,22 @@ class ReplayBuffer:
         sequences while SAC still bootstraps through them.
         """
         horizon = int(horizon)
-        if horizon < 1 or self.size < horizon:
+        if horizon < 1 or self.size < horizon + 2:
             raise ValueError('not enough transitions for requested horizon')
-        candidates = self.size - horizon + 1
+        candidates = self.size - horizon
         oldest = self.pos if self.size == self.capacity else 0
         offsets = np.arange(horizon)
         valid = []
         # Episodes are long relative to the default horizon, so rejection
         # sampling is cheaper than scanning a large replay buffer per update.
-        while len(valid) < batch_size:
+        for _ in range(32):
             logical = self.rng.integers(candidates, size=max(batch_size * 2, 32))
-            physical = (oldest + logical[:, None] + offsets[None, :]) % self.capacity
-            valid.extend(logical[~self.ended[physical].astype(bool).any(axis=1)].tolist())
-            if len(valid) == 0 and candidates < batch_size:
-                raise ValueError('no complete replay sequence without an episode boundary')
+            interior = (oldest + logical[:, None] + offsets[None, :-1]) % self.capacity
+            valid.extend(logical[~self.ended[interior].astype(bool).any(axis=1)].tolist())
+            if len(valid) >= batch_size:
+                break
+        if len(valid) < batch_size:
+            raise RuntimeError('could not sample enough boundary-free sequences')
         logical = np.asarray(valid[:batch_size], dtype=np.int64)
         sequence = (oldest + logical[:, None] + offsets[None, :]) % self.capacity
         start = (oldest + logical) % self.capacity

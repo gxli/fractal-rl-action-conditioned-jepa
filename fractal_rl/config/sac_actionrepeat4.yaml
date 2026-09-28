@@ -1,0 +1,5 @@
+environment:
+  action_repeat: 4
+sac:
+  # Preserve the original .02 s physical discount time constant: .99^4.
+  gamma: 0.96059601

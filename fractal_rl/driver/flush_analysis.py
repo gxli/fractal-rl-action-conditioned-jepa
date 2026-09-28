@@ -1,8 +1,9 @@
 """Run the complete default visualization pipeline for one training run.
 
 This is the standard post-training flush: curve (including JEPA loss),
-deterministic inference, UMAP, episode diagnostics, pairwise UMAP, CKA, and a
-machine-readable manifest. Run from the repository root.
+deterministic inference, UMAP, episode diagnostics, pairwise UMAP, CKA, dense
+spatial latent RGB maps, and a machine-readable manifest. Run from the project
+root.
 """
 import argparse
 import json
@@ -40,6 +41,11 @@ def main():
         ['-m', 'driver.compare_checkpoint_umaps', checkpoint_glob, '--device', args.device,
          '--seed', str(ac['inference_seed']), '--steps', str(ac['pairwise_steps']),
          '--limit', str(ac['pairwise_limit']), '--plot-size', str(ac['pairwise_plot_size']), '--output-dir', str(root)],
+        ['-m', 'driver.plot_dense_latent_maps', checkpoint_glob, '--device', args.device,
+         '--seed', str(ac['inference_seed']), '--steps', str(ac['inference_steps']),
+         '--resolution', str(ac.get('dense_map_resolution', 256)),
+         '--batch-size', str(ac.get('dense_map_batch_size', 256)),
+         '--limit', str(ac['pairwise_limit']), '--output-dir', str(root)],
     ]
     for command in commands:
         subprocess.run([sys.executable, *command], check=True)

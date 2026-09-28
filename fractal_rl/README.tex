@@ -646,6 +646,34 @@ The remaining open question is whether a smaller coefficient or longer,
 multi-seed training horizon changes that result; the next comparison must use
 this corrected branch, not the historical 0.1 implementation.
 
+\section{World-frame PPO and PPO+JEPA protocol (September 21, 2026)}
+The previous velocity-aligned observation was found to be degenerate: its
+reported local velocity is exactly $(\|\mathbf v\|,0)$, while a third state
+entry separately reports the same speed. Thus the six-value state effectively
+contained only speed, mass, and the prior action. More importantly, in that
+frame a small lateral acceleration rotates the entire potential image while
+leaving its centre fixed. This makes one-step image prediction nearly an
+identity map and weakens the action-conditioned JEPA signal.
+
+New PPO-only and PPO+JEPA runs therefore use a fixed world observation frame.
+The image is aligned to world $+y$ and the state is
+$(v_y,v_x,\|\mathbf v\|,m,a_{t-1,\parallel},a_{t-1,\perp})$, preserving both
+velocity components. Both 5-million-transition RTX 3090 runs use the same
+centered-Gaussian potential, $P_{\max}=6$ controller, 16 parallel
+environments, and held-out seeds 100001--100004. The PPO+JEPA branch additionally
+uses \code{config/jepa.yaml}, with one-step action-conditioned JEPA and
+$\lambda_{\rm JEPA}=0.1$. Results will be appended only after final checkpoints
+and the complete analysis flush are available.
+
+For the cross-case diagnosis, the new
+\code{driver.plot\_umap\_3d} tool runs deterministic inference for every
+finalized checkpoint on the same held-out terrain, fits one joint three-dimensional
+UMAP across all encoder states, and normalizes its three coordinates to RGB.
+It writes (i) one 3-D latent UMAP per case and (ii) a 3-D physical
+$(x,y,\text{speed})$ trajectory per case colored by that shared latent RGB code,
+along with a row-level CSV. This makes behavioral differences and representation
+differences inspectable without independently rescaling each run's UMAP.
+
 \section{Implementation safeguards and ablations}
 The current default is an \emph{unshared} actor--critic: actor and critic each
 have their own CNN and 128-D MLP. The old shared encoder remains available as

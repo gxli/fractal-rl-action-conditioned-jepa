@@ -1,0 +1,9 @@
+# Architecture control: critic-trained shared encoder, no JEPA or regularizer.
+training:
+  encoder_sharing: critic_trained
+  jepa_coef: 0.0
+  critic_jepa_coef: 0.0
+  jepa_inverse_coef: 0.0
+  jepa_action_margin_coef: 0.0
+  jepa_variance_coef: 0.0
+  jepa_regularizer_coef: 0.0

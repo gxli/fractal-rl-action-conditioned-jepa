@@ -1,0 +1,274 @@
+\documentclass[10pt]{article}
+\usepackage[margin=.72in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,graphicx,microtype}
+\usepackage{caption}
+\title{SAC and JEPA on Fractal Terrain: Short Experimental Report}
+\author{}
+\date{September 25, 2026}
+\begin{document}
+\maketitle
+
+\section{Design}
+Each terrain is a $512\times512$ periodic pink-noise intensity field $I$ with
+spectral exponent $\alpha$; the physical potential is $\phi=|I|^2$. Intensity
+is percentile-normalized (1st--99th), and the potential gradient is divided by
+its 95th-percentile magnitude. The source task uses $\alpha=3$; transfer changes
+only this exponent. There are 64 training terrain seeds and four disjoint
+held-out seeds (100001--100004).
+
+Because $I$ is standardized before squaring, changing $\alpha$ changes spatial
+correlation and basin geometry, not the intended one-point scale of $\phi$.
+Figure~\ref{fig:terrain-hist} confirms this: whole-field potential histograms
+remain close, whereas same-seed spatial traces become smoother as $\alpha$ rises.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.96\linewidth]{dumps/sac_noim_analysis/terrain_value_histograms.png}
+\caption{Terrain-value reference for the three current exponents, aggregated
+over four held-out seeds. Similar marginals result from standardizing intensity
+before $\phi=I^2$; offset traces expose the differing spatial scale.}
+\label{fig:terrain-hist}
+\end{figure}
+
+The point mass has $m=1$, $\Delta t=.02$ with two semi-implicit Euler substeps,
+longitudinal/lateral limits $2/1$, potential scale $4$, and linear damping $.6$.
+For $a=(a_{\parallel},a_{\perp})\in[-1,1]^2$,
+\[
+ \dot v=2a_{\parallel}\hat v+a_{\perp}\hat v_\perp-4\nabla\phi/g_{.95}-.6v .
+\]
+At each step the agent receives a world-frame $32\times32$ local potential
+patch (one world unit per pixel) and a six-dimensional state: two velocity
+components, speed, mass, and previous two actions. For the replacement
+three-arm experiment, every reset starts at the deterministic global minimum
+of that terrain's sampled potential grid. Thus a method cannot obtain initial
+speed merely by descending from a high-potential start. Heading and initial
+speed in $[0,1]$ remain RNG-controlled and are aligned by matched environment
+and evaluation seeds. Episodes have 2,000 steps. Reward is distance travelled
+minus $.02\times.05\|a\|^2$; hence mean speed is the direct evaluation metric.
+Held-out values use a deterministic policy on the four held-out terrain seeds.
+
+\paragraph{Temporal and spatial optimization scales.}
+The JEPA prediction is optimized over $K=8$ environment steps: exactly
+$8\times.02=.16$ simulated seconds. Its input is $z_t$ plus the eight
+two-dimensional replay actions, and its target is the EMA latent at $t+8$.
+This local optimization window is much shorter than the $32\times32$ encoder
+field of view (32 world units across), the 2,000-step / 40-second episode, and
+SAC's effective discounted horizon of $(1-.99)^{-1}\approx100$ steps (2 s).
+The critic therefore learns longer bootstrapped consequences than JEPA's local
+transition task. No fixed spatial length follows from eight steps because speed
+is state-dependent; on flat terrain the damping-limited $2/.6\approx3.33$
+speed would traverse roughly .53 world units in .16 s.
+
+\section{Fresh minimum-start comparison}
+All earlier random-start curves are retired. The matched 20k protocol uses SAC,
+SAC+JEPA, and SAC+JEPA+variance regularization; every reset starts at the global
+terrain minimum. These are distinct ablations:
+\[
+\begin{array}{lll}
+\text{SAC:} & c_{\rm JEPA}=0, & c_{\rm reg}=0,\\
+\text{SAC+JEPA:} & c_{\rm JEPA}=.025, & c_{\rm reg}=0,\\
+\text{SAC+JEPA+variance:} & c_{\rm JEPA}=.025, & c_{\rm reg}=.01.
+\end{array}
+\]
+The latter two retain the same eight-step predictor and critic-JEPA coefficient;
+only the latent regularizer is changed.
+
+Two additional arms use the same $c_{\rm JEPA}=.025$ but replace the variance
+penalty by SIGReg ($c_{\rm reg}=.005$) or spherical MMD
+($c_{\rm reg}=.01$). Their minimum-start source runs are in progress and are
+not silently folded into the completed three-arm result below.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.98\linewidth]{dumps/minstart_v2_analysis/three_arm_curves.png}
+\caption{Fresh global-minimum-start comparison. The source column includes
+all five completed source arms (SAC, JEPA, variance, SIGReg, spherical MMD).
+The two transfer columns presently contain the completed first three arms;
+SIGReg and spherical-MMD transfers are pending.}
+\end{figure}
+
+\section{Terrain walk examples}
+Terrain is not a static image-classification input: the policy must maintain a
+speed-producing path through local basins and slopes.  The examples below use
+shared held-out terrain tiles and start locations, making the geometric effect
+of policy choices directly visible.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.94\linewidth,height=.68\textheight,keepaspectratio]{dumps/spectral_random_start_evaluation/random_start_trajectory_panels.png}
+\caption{Representative deterministic terrain walks.  Adjacent SAC and
+SAC+JEPA trajectories use the same held-out tile and starting condition.}
+\end{figure}
+
+\section{Effect of JEPA}
+The SAC actor minimizes
+\[
+L_{\rm SAC}=\mathbb E[\eta\log\pi(a|o)-\min(Q_1(o,a),Q_2(o,a))],
+\]
+and each critic minimizes TD MSE against a Polyak target critic ($\gamma=.99$,
+$\tau=.005$). For V3 JEPA, an online encoder produces $z_t$ and an EMA encoder
+produces a stop-gradient target $\bar z_{t+8}$. The predictor receives eight
+replayed actions:
+\[
+L_{\rm JEPA}=1-\cos\left(q([z_t,a_t,\ldots,a_{t+7}]),\operatorname{sg}[\bar z_{t+8}]\right).
+\]
+For the current ablation, the actor objective is deliberately simpler:
+\[
+L_{\rm actor}=L_{\rm SAC}+.025L_{\rm JEPA}+c_{\rm reg}L_{\rm reg}.
+\]
+The implementation also applies a predictive auxiliary loss to the independent
+Q encoders. Inverse dynamics and shuffled-action margin are set exactly to zero
+and are not optimized. The archived clean-run CSV records the total critic
+objective but not a separate critic-auxiliary component, so the loss figure
+below reports the exact logged critic objective without inventing a split.
+
+\section{Effect of regularization terms}
+The completed clean screen compares variance, SIGReg, and spherical MMD, all
+for 20k transitions with zero inverse and margin coefficients. At source
+$\alpha=3$, final held-out speeds are $3.036\pm.036$, $3.028\pm.042$, and
+$3.030\pm.012$ respectively. Frozen transfer to $\alpha=2$ yields
+$2.998\pm.024$, $3.035\pm.053$, and $3.012\pm.038$; transfer to $\alpha=3.5$
+yields $2.975\pm.066$, $3.018\pm.062$, and $2.987\pm.027$. These are one-run,
+four-held-out-seed standard deviations, not multi-seed confidence intervals.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.98\linewidth]{dumps/sac_noim_analysis/clean_noim_behavior.png}
+\caption{Completed clean no-inverse/no-margin behavioural comparison. Shaded
+bands show held-out-seed standard deviations.}\label{fig:clean-behavior}
+\end{figure}
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.98\linewidth]{dumps/sac_noim_analysis/clean_noim_loss_terms.png}
+\caption{Per-condition, exact logged optimization terms. Left: SAC actor
+term (solid) and total actor loss (dashed); middle: logged critic objective;
+right: weighted actor JEPA and logged variance terms. Inverse and action-margin
+terms are identically zero; no critic-JEPA component was logged separately.}
+\label{fig:clean-losses}
+\end{figure}
+
+\section{Encoder correlation and frozen-transfer representations}
+Centered linear CKA was computed on a common 600-step deterministic held-out
+observation sequence. Within clean JEPA, $Q_1$--$Q_2$ CKA is $.90$ and
+actor--critic CKA is $.76$; the SAC critic pair is $.87$, and cross-model actor
+CKA is $.49$. CKA measures representation similarity, not transfer quality.
+Moreover, the vanilla checkpoint is at 50k and clean JEPA at 20k transitions,
+so this matrix is not a controlled training-budget comparison.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.86\linewidth]{dumps/minstart_v2_analysis/three_arm_encoder_cka_blocks.png}
+\caption{Fresh three-run CKA decomposed into actor/$Q_1$/$Q_2$ blocks.}\label{fig:cka}
+\end{figure}
+
+\paragraph{Temporal CKA (pending).} The present CKA is the completed 20k
+snapshot. A full five-arm source rerun with checkpoints every 2k transitions
+will append actor--$Q_1$, actor--$Q_2$, and $Q_1$--$Q_2$ CKA trajectories,
+computed on one fixed minimum-start held-out observation sequence. This avoids
+mistaking separately sampled trajectories for representational drift.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.94\linewidth]{dumps/minstart_v2_analysis/sharing_temporal_cka.png}
+\caption{Per-dump CKA already available from the encoder-sharing source sweep:
+actor--$Q_1$, actor--$Q_2$, and $Q_1$--$Q_2$ on fixed minimum-start held-out
+observations. The fully-shared run becomes unstable; critic-trained sharing
+remains high-similarity and behaviourally stable.}\label{fig:sharing-temporal-cka}
+\end{figure}
+
+The following six figures show frozen-encoder transfer diagnostics: terrain/path,
+then PCA and UMAP for actor, $Q_1$, and $Q_2$ embeddings on the same trajectory.
+PCA and UMAP are fitted per panel, so topology within a panel is diagnostic but
+absolute axes cannot be compared across panels. This is especially important
+because the actor encoder receives policy plus JEPA gradients, while each critic
+encoder receives TD (and, when enabled, predictive) gradients; they need not
+parameterize the same latent coordinates. UMAP further has arbitrary rotation,
+translation, and scale and is a nonlinear neighbourhood visualization, not a
+shared coordinate system. The CKA matrix therefore compares the original
+activations on identical observations; it is the appropriate encoder-relation
+measurement, whereas separate UMAPs show each encoder's own trajectory geometry.
+
+\begin{figure}[p]\centering
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_variance_010_frozen_a2/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\caption{Frozen encoder, transfer to $\alpha=2$, variance regularization.}\label{fig:rep-a2-var}
+\end{figure}
+\begin{figure}[p]\centering
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_sigreg_005_frozen_a2/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\caption{Frozen encoder, transfer to $\alpha=2$, SIGReg.}\label{fig:rep-a2-sig}
+\end{figure}
+\begin{figure}[p]\centering
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_spherical_mmd_010_frozen_a2/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\caption{Frozen encoder, transfer to $\alpha=2$, spherical MMD.}\label{fig:rep-a2-sph}
+\end{figure}
+\begin{figure}[p]\centering
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_variance_010_frozen_a35/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\caption{Frozen encoder, transfer to $\alpha=3.5$, variance regularization.}\label{fig:rep-a35-var}
+\end{figure}
+\begin{figure}[p]\centering
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_sigreg_005_frozen_a35/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\caption{Frozen encoder, transfer to $\alpha=3.5$, SIGReg.}\label{fig:rep-a35-sig}
+\end{figure}
+\begin{figure}[p]\centering
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_spherical_mmd_010_frozen_a35/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\caption{Frozen encoder, transfer to $\alpha=3.5$, spherical MMD.}\label{fig:rep-a35-sph}
+\end{figure}
+
+\section{Encoder-sharing alternatives}
+The completed experiments use \emph{separate} visual encoders: the actor,
+$Q_1$, and $Q_2$ each have a backbone. The main alternatives are:
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+Architecture & actor encoder & critic encoder & encoder gradients\\
+\midrule
+Separate (current) & own & own $Q_1,Q_2$ & each loss updates its own encoder\\
+Fully shared & shared & shared & actor, critic, and JEPA all update it\\
+Shared, critic-trained & shared read-only & shared & TD critic loss only\\
+\bottomrule
+\end{tabular}
+\end{center}
+For critic-trained sharing, $z=e(o)$ feeds the critics while the actor receives
+$z_\pi=\operatorname{sg}[z]$:
+\[
+ L_Q\rightarrow e,\qquad L_\pi\not\rightarrow e,\qquad
+ Q_i=Q_i(z,a),\quad a\sim\pi(\operatorname{sg}[z]).
+\]
+This gives the backbone the critic's TD regression signal while preventing
+policy-gradient interference. It is a separate ablation: the optional shared
+mode currently implemented here instead uses an actor-owned encoder and detaches
+features before critic heads ($L_Q\not\rightarrow e$); critic JEPA is mutually
+exclusive with that mode.
+
+\paragraph{Completed controlled sweep.}
+Fully shared and critic-trained sharing completed source and frozen $\alpha=2$
+and $\alpha=3.5$ transfers with 2k checkpoints. Critic-trained sharing remains
+stable; fully shared collapses at $\alpha=3.5$.
+
+\section{Verdict}
+\begin{figure}[ht]\centering
+\includegraphics[width=.98\linewidth]{dumps/minstart_v2_analysis/sharing_curves.png}
+\caption{Completed encoder-sharing source and frozen-transfer comparison.}
+\end{figure}
+\begin{figure}[ht]\centering
+\includegraphics[width=.82\linewidth]{dumps/minstart_v2_analysis/freeze_ablation.png}
+\caption{Transfer freeze ablation: both encoders frozen versus critic frozen with actor encoder adaptation.}
+\end{figure}
+\begin{figure}[ht]\centering
+\includegraphics[width=.92\linewidth]{dumps/minstart_v2_analysis/five_arm_encoder_cka_blocks.png}
+\caption{Completed five-arm source CKA matrix, decomposed into $3\times3$ actor/$Q_1$/$Q_2$ blocks.}
+\end{figure}
+JEPA alone does not show a consistent gain over SAC: source endpoints occupy a
+narrow $3.04$--$3.09$ range, and plain JEPA is near SAC after both shifts.
+Regularization is conditional rather than universally beneficial. Spherical MMD
+is the best regularizer at $\alpha=3.5$ (3.080 versus SAC 3.010), while SIGReg
+and spherical MMD are lower than SAC at $\alpha=2$ (2.958 and 2.908 versus
+3.054). Variance is approximately neutral.
+
+The clearest architectural result is encoder sharing: fully shared gradients
+are unstable (fully shared reaches only .011 at frozen $\alpha=3.5$), whereas
+critic-trained sharing is stable and strongest among the sharing modes (3.092
+at $\alpha=2$, 3.059 at $\alpha=3.5$). The preferred tested design is therefore
+\[
+z=e(o),\qquad Q_1(z,a),Q_2(z,a),\qquad \pi(\operatorname{sg}[z]),
+\]
+where TD critic loss updates $e$ and the actor consumes stop-gradient features.
+Finally, allowing the actor encoder to adapt while critic encoders remain frozen
+hurts the harder $\alpha=2$ transfer (2.369 versus 3.035 when both are frozen),
+so freezing both encoders is the better tested transfer protocol. These are
+single-training-seed results; small endpoint differences need multi-seed repeats.
+
+\end{document}

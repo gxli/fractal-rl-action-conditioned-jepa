@@ -1,0 +1,13 @@
+# Fair middle arm: action-conditioned JEPA with no latent regularizer.
+# Keep horizon, EMA, actor/critic JEPA coefficients, and all other SAC values
+# identical to the SAC+JEPA+regularizer arm (sac_jepa_v3.yaml).
+training:
+  jepa_coef: 0.025
+  critic_jepa_coef: 0.025
+  jepa_horizon: 8
+  jepa_target_tau: 0.01
+  jepa_target_update_transitions: 64
+  jepa_inverse_coef: 0.0
+  jepa_action_margin_coef: 0.0
+  jepa_variance_coef: 0.0
+  jepa_regularizer_coef: 0.0

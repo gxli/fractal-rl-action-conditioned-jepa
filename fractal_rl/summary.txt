@@ -1,10 +1,10 @@
-Python Source Summary
+`Python Source Summary
 =====================
 
 Project root: /Users/gxli/proj/fractral_rl/fractal_rl
-Included src files: 21
-Detected main/entry files: 13
-Total unique files included: 34
+Included src files: 24
+Detected main/entry files: 21
+Total unique files included: 45
 
 ================================================================================
 FILE: src/__init__.py
@@ -45,6 +45,7 @@ def standard_inference_paths(output_dir, checkpoint, seed):
         'umap_csv': root / 'plots' / f'latent_umap_{stem}.csv',
         'umap_plot': root / 'plots' / f'latent_umap_{stem}.png',
         'acceleration_plot': root / 'plots' / f'acceleration_history_{stem}.png',
+        'dynamics_plot': root / 'plots' / f'dynamics_history_{stem}.png',
         'episode_plot': root / 'plots' / f'episode_diagnostics_{stem}.png',
     }
 
@@ -127,7 +128,7 @@ class FractalEnv:
 FILE: src/env/observation.py
 ================================================================================
 
-"""Velocity/heading-aligned 32x32 local potential and proprioception."""
+"""Local potential and directional proprioception in a configurable frame."""
 import numpy as np
 from src.terrain.periodic_field import sample
 
@@ -140,8 +141,22 @@ def observe(body, terrain, cfg, previous_action):
     if pixel <= 0:
         raise ValueError('fov_pixel_size must be positive')
     speed = float(np.linalg.norm(body.velocity))
-    heading = np.arctan2(body.velocity[1], body.velocity[0]) if speed > 1e-6 else body.heading
-    forward = np.array([np.cos(heading), np.sin(heading)])
+    frame = cfg.get('observation_frame', 'velocity')
+    if frame == 'world':
+        # Keep the map and velocity in one inertial frame.  Unlike the legacy
+        # velocity-aligned view, this retains both velocity components instead
+        # of reducing them to [speed, 0], and avoids rotating the whole patch
+        # after each small lateral acceleration.
+        forward = np.array([0.0, 1.0])
+    elif frame == 'velocity':
+        # Compatibility mode for existing checkpoints/configurations.
+        speed_epsilon = float(cfg.get('heading_epsilon', 1e-6))
+        if speed > speed_epsilon:
+            forward = body.velocity / speed
+        else:
+            forward = np.array([np.cos(body.heading), np.sin(body.heading)])
+    else:
+        raise ValueError("observation_frame must be 'world' or 'velocity'")
     convention = cfg.get('steering_convention', 'left')
     if convention not in {'left', 'right'}:
         raise ValueError("steering_convention must be 'left' or 'right'")
@@ -289,11 +304,13 @@ FILE: src/rl/policy.py
 import numpy as np
 import torch
 from torch import nn
+import copy
 from torch.distributions import Normal
+from torch.nn import functional as F
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, fov_size=32, state_dim=6, architecture='shared'):
+    def __init__(self, fov_size=32, state_dim=6, architecture='shared', jepa_enabled=False):
         super().__init__()
         if architecture not in {'shared', 'unshared'}:
             raise ValueError("architecture must be 'shared' or 'unshared'")
@@ -319,6 +336,16 @@ class ActorCritic(nn.Module):
         self.actor = nn.Linear(128, 2)
         self.critic = nn.Linear(128, 1)
         self.log_std = nn.Parameter(torch.full((2,), -0.5))
+        self.jepa_enabled = jepa_enabled
+        if jepa_enabled:
+            # Target parameters are EMA-updated and never receive gradients.
+            self.target_cnn = copy.deepcopy(self.cnn)
+            self.target_encoder = copy.deepcopy(self.encoder)
+            for parameter in self.target_cnn.parameters():
+                parameter.requires_grad_(False)
+            for parameter in self.target_encoder.parameters():
+                parameter.requires_grad_(False)
+            self.jepa_predictor = nn.Sequential(nn.Linear(128 + 2, 128), nn.Tanh(), nn.Linear(128, 128))
 
     def encode(self, terrain, state):
         """Return the actor representation (shared representation when selected)."""
@@ -328,6 +355,33 @@ class ActorCritic(nn.Module):
         if self.architecture == 'shared':
             return self.encode(terrain, state)
         return self.critic_encoder(torch.cat([self.critic_cnn(terrain), state], dim=-1))
+
+    def target_encode(self, terrain, state):
+        if not self.jepa_enabled:
+            raise RuntimeError('JEPA target encoder is disabled')
+        return self.target_encoder(torch.cat([self.target_cnn(terrain), state], dim=-1))
+
+    def jepa_loss(self, terrain, state, action, next_terrain, next_state,
+                  embedding=None):
+        """Scale-free action-conditioned prediction of the next target latent."""
+        if not self.jepa_enabled:
+            return terrain.new_zeros(())
+        embedding = self.encode(terrain, state) if embedding is None else embedding
+        prediction = self.jepa_predictor(torch.cat([embedding, action.flatten(1)], dim=-1))
+        with torch.no_grad():
+            target = self.target_encode(next_terrain, next_state)
+        return (1.0 - F.cosine_similarity(prediction, target, dim=-1)).mean()
+
+    @torch.no_grad()
+    def update_jepa_target(self, tau):
+        if not self.jepa_enabled:
+            return
+        if not 0 < tau <= 1:
+            raise ValueError('jepa_target_tau must be in (0, 1]')
+        for online, target in zip(self.cnn.parameters(), self.target_cnn.parameters()):
+            target.lerp_(online, tau)
+        for online, target in zip(self.encoder.parameters(), self.target_encoder.parameters()):
+            target.lerp_(online, tau)
 
     def forward(self, terrain, state):
         return self.actor(self.encode(terrain, state)), self.critic(self.encode_critic(terrain, state)).squeeze(-1)
@@ -354,6 +408,75 @@ def tensor_obs(observations, device):
 
 
 ================================================================================
+FILE: src/rl/replay.py
+================================================================================
+
+"""Fixed-size replay storage for off-policy algorithms."""
+import numpy as np
+import torch
+
+
+class ReplayBuffer:
+    def __init__(self, capacity, observation, seed=0):
+        self.capacity, self.pos, self.size = int(capacity), 0, 0
+        if self.capacity < 1:
+            raise ValueError('capacity must be positive')
+        self.rng = np.random.default_rng(seed)
+        def alloc(shape): return np.empty((self.capacity, *shape), dtype=np.float32)
+        self.terrain, self.state = alloc(observation['terrain'].shape), alloc(observation['state'].shape)
+        self.next_terrain, self.next_state = alloc(observation['terrain'].shape), alloc(observation['state'].shape)
+        self.action, self.reward, self.terminated, self.ended = alloc((2,)), alloc(()), alloc(()), alloc(())
+
+    def add(self, observation, action, reward, next_observation, terminated, ended=False):
+        i = self.pos
+        self.terrain[i], self.state[i] = observation['terrain'], observation['state']
+        self.action[i], self.reward[i], self.terminated[i], self.ended[i] = action, reward, float(terminated), float(ended)
+        self.next_terrain[i], self.next_state[i] = next_observation['terrain'], next_observation['state']
+        self.pos, self.size = (i + 1) % self.capacity, min(self.size + 1, self.capacity)
+
+    def sample(self, batch_size, device):
+        if self.size < batch_size:
+            raise ValueError('not enough transitions')
+        i = self.rng.integers(self.size, size=batch_size)
+        as_tensor = lambda array: torch.as_tensor(array[i], dtype=torch.float32, device=device)
+        return tuple(as_tensor(array) for array in (self.terrain, self.state, self.action, self.reward,
+                                                     self.next_terrain, self.next_state, self.terminated))
+
+    def sample_sequence(self, batch_size, horizon, device):
+        """Sample contiguous replay sequences without crossing episode resets.
+
+        The returned action sequence starts at ``o_t`` and its target is the
+        real next observation after the K-th action.  ``ended`` is separate
+        from ``terminated`` because time-limit resets must break JEPA
+        sequences while SAC still bootstraps through them.
+        """
+        horizon = int(horizon)
+        if horizon < 1 or self.size < horizon + 2:
+            raise ValueError('not enough transitions for requested horizon')
+        candidates = self.size - horizon
+        oldest = self.pos if self.size == self.capacity else 0
+        offsets = np.arange(horizon)
+        valid = []
+        # Episodes are long relative to the default horizon, so rejection
+        # sampling is cheaper than scanning a large replay buffer per update.
+        for _ in range(32):
+            logical = self.rng.integers(candidates, size=max(batch_size * 2, 32))
+            interior = (oldest + logical[:, None] + offsets[None, :-1]) % self.capacity
+            valid.extend(logical[~self.ended[interior].astype(bool).any(axis=1)].tolist())
+            if len(valid) >= batch_size:
+                break
+        if len(valid) < batch_size:
+            raise RuntimeError('could not sample enough boundary-free sequences')
+        logical = np.asarray(valid[:batch_size], dtype=np.int64)
+        sequence = (oldest + logical[:, None] + offsets[None, :]) % self.capacity
+        start = (oldest + logical) % self.capacity
+        target = (oldest + logical + horizon - 1) % self.capacity
+        as_tensor = lambda array: torch.as_tensor(array, dtype=torch.float32, device=device)
+        return (as_tensor(self.terrain[start]), as_tensor(self.state[start]), as_tensor(self.action[sequence]),
+                as_tensor(self.next_terrain[target]), as_tensor(self.next_state[target]))
+
+
+================================================================================
 FILE: src/rl/rollout.py
 ================================================================================
 
@@ -370,6 +493,296 @@ def compute_gae(rewards, values, next_values, terminated, ended, gamma, gae_lamb
         following = delta + gamma * gae_lambda * (1 - ended[t]) * following
         advantage[t] = following
     return advantage, advantage + values
+
+
+================================================================================
+FILE: src/rl/sac.py
+================================================================================
+
+"""Tanh-Gaussian SAC actor, optional JEPA auxiliary branch, and twin Q networks."""
+import copy
+import math
+import torch
+from torch import nn
+from torch.distributions import Normal
+from torch.nn import functional as F
+
+
+def make_encoder(fov_size, state_dim=6):
+    cnn = nn.Sequential(nn.Conv2d(1, 16, 5, stride=2), nn.ReLU(), nn.Conv2d(16, 32, 3, stride=2), nn.ReLU(), nn.Flatten())
+    with torch.no_grad(): features = cnn(torch.zeros(1, 1, fov_size, fov_size)).shape[-1]
+    return cnn, nn.Sequential(nn.Linear(features + state_dim, 128), nn.Tanh(), nn.Linear(128, 128), nn.Tanh())
+
+
+class SACActor(nn.Module):
+    def __init__(self, fov_size=32, state_dim=6, jepa_enabled=False, jepa_horizon=1,
+                 jepa_inverse_enabled=False):
+        super().__init__()
+        self.cnn, self.encoder = make_encoder(fov_size, state_dim)
+        self.actor = nn.Linear(128, 4)
+        self.jepa_enabled = jepa_enabled
+        self.jepa_horizon = int(jepa_horizon)
+        self.jepa_inverse_enabled = jepa_inverse_enabled
+        if self.jepa_horizon < 1:
+            raise ValueError('jepa_horizon must be positive')
+        if jepa_enabled:
+            # This target is separate from SAC's target critics. It is an EMA
+            # copy of the actor encoder and receives no gradient updates.
+            self.target_cnn = copy.deepcopy(self.cnn)
+            self.target_encoder = copy.deepcopy(self.encoder)
+            self.target_cnn.requires_grad_(False)
+            self.target_encoder.requires_grad_(False)
+            self.jepa_predictor = nn.Sequential(
+                nn.Linear(128 + 2 * self.jepa_horizon, 128), nn.Tanh(), nn.Linear(128, 128))
+            if jepa_inverse_enabled:
+                self.jepa_inverse_predictor = nn.Sequential(
+                    nn.Linear(256, 128), nn.Tanh(), nn.Linear(128, 2))
+
+    def encode(self, terrain, state):
+        return self.encoder(torch.cat([self.cnn(terrain), state], dim=-1))
+
+    def target_encode(self, terrain, state):
+        if not self.jepa_enabled:
+            raise RuntimeError('JEPA target encoder is disabled')
+        return self.target_encoder(torch.cat([self.target_cnn(terrain), state], dim=-1))
+
+    def jepa_loss(self, terrain, state, action, next_terrain, next_state,
+                  embedding=None, return_details=False):
+        """Predict a K-step EMA target from an online latent and action sequence."""
+        if not self.jepa_enabled:
+            return terrain.new_zeros(())
+        embedding = self.encode(terrain, state) if embedding is None else embedding
+        if action.ndim == 2:
+            action = action[:, None, :]
+        if action.shape[1:] != (self.jepa_horizon, 2):
+            raise ValueError(f'expected action sequence [batch, {self.jepa_horizon}, 2]')
+        prediction = self.jepa_predictor(torch.cat([embedding, action.flatten(1)], dim=-1))
+        with torch.no_grad():
+            target = self.target_encode(next_terrain, next_state)
+        loss = (1.0 - F.cosine_similarity(prediction, target, dim=-1)).mean()
+        return (loss, prediction, target) if return_details else loss
+
+    def inverse_loss(self, embedding, target_embedding, action_sequence):
+        """Recover the first applied action from the two latent endpoints."""
+        if not self.jepa_inverse_enabled:
+            return embedding.new_zeros(())
+        prediction = self.jepa_inverse_predictor(torch.cat([embedding, target_embedding], dim=-1))
+        return F.mse_loss(prediction, action_sequence[:, 0])
+
+    @torch.no_grad()
+    def update_jepa_target(self, tau):
+        """Move the JEPA target encoder ``tau`` of the way toward online weights."""
+        if not self.jepa_enabled:
+            return
+        if not 0 < tau <= 1:
+            raise ValueError('jepa_target_tau must be in (0, 1]')
+        for online, target in zip(self.cnn.parameters(), self.target_cnn.parameters()):
+            target.lerp_(online, tau)
+        for online, target in zip(self.encoder.parameters(), self.target_encoder.parameters()):
+            target.lerp_(online, tau)
+
+    def act_from_embedding(self, embedding, deterministic=False):
+        """Sample an action after a caller has already encoded an observation."""
+        mean, log_std = self.actor(embedding).chunk(2, dim=-1)
+        distribution = Normal(mean, log_std.clamp(-5, 2).exp())
+        raw = mean if deterministic else distribution.rsample()
+        action = torch.tanh(raw)
+        correction = 2 * (math.log(2) - raw - F.softplus(-2 * raw))
+        return action, raw, (distribution.log_prob(raw) - correction).sum(-1), None
+
+    def act(self, terrain, state, deterministic=False):
+        return self.act_from_embedding(self.encode(terrain, state), deterministic)
+
+
+class QNetwork(nn.Module):
+    def __init__(self, fov_size=32, state_dim=6):
+        super().__init__()
+        self.cnn, self.encoder = make_encoder(fov_size, state_dim)
+        self.head = nn.Sequential(nn.Linear(130, 128), nn.ReLU(), nn.Linear(128, 1))
+
+    def forward(self, terrain, state, action):
+        return self.head(torch.cat([self.encoder(torch.cat([self.cnn(terrain), state], dim=-1)), action], dim=-1)).squeeze(-1)
+
+
+class TwinQ(nn.Module):
+    def __init__(self, fov_size=32, state_dim=6):
+        super().__init__()
+        self.q1, self.q2 = QNetwork(fov_size, state_dim), QNetwork(fov_size, state_dim)
+
+    def forward(self, terrain, state, action):
+        return self.q1(terrain, state, action), self.q2(terrain, state, action)
+
+
+================================================================================
+FILE: src/rl/sac_trainer.py
+================================================================================
+
+"""Off-policy SAC training on the FractalEnv, using twin critics and replay."""
+import csv
+from copy import deepcopy
+from pathlib import Path
+import random
+import warnings
+import numpy as np
+import torch
+from torch.nn import functional as F
+from src.env.fractal_env import FractalEnv
+from src.rl.replay import ReplayBuffer
+from src.rl.sac import SACActor, TwinQ
+from src.rl.trainer import evaluate
+from src.terrain.pink_noise import generate
+from src.utils.config import save_config
+
+
+def update(actor, critics, target, replay, actor_opt, critic_opt, log_alpha, alpha_opt, cfg, device):
+    terrain, state, action, reward, next_terrain, next_state, terminated = replay.sample(cfg['sac']['batch_size'], device)
+    alpha = log_alpha.exp().detach()
+    with torch.no_grad():
+        next_action, _, next_logp, _ = actor.act(next_terrain, next_state)
+        tq1, tq2 = target(next_terrain, next_state, next_action)
+        target_value = reward + float(cfg['sac']['gamma']) * (1 - terminated) * (torch.minimum(tq1, tq2) - alpha * next_logp)
+    q1, q2 = critics(terrain, state, action)
+    critic_loss = F.mse_loss(q1, target_value) + F.mse_loss(q2, target_value)
+    critic_opt.zero_grad(set_to_none=True); critic_loss.backward(); critic_opt.step()
+    critics.requires_grad_(False)
+    jepa_coef = float(cfg['training'].get('jepa_coef', 0.0))
+    inverse_coef = float(cfg['training'].get('jepa_inverse_coef', 0.0))
+    variance_coef = float(cfg['training'].get('jepa_variance_coef', 0.0))
+    embedding = actor.encode(terrain, state) if (actor.jepa_enabled or variance_coef > 0) else None
+    new_action, _, logp, _ = (actor.act_from_embedding(embedding)
+                              if embedding is not None else actor.act(terrain, state))
+    q1_pi, q2_pi = critics(terrain, state, new_action)
+    sac_actor_loss = (alpha * logp - torch.minimum(q1_pi, q2_pi)).mean()
+    # Replay stores the actual tanh-squashed action sent to the environment,
+    # so JEPA predicts the transition that was actually observed rather than a
+    # fresh actor sample.
+    if actor.jepa_enabled:
+        sequence_terrain, sequence_state, action_sequence, future_terrain, future_state = replay.sample_sequence(
+            cfg['sac']['batch_size'], actor.jepa_horizon, device)
+        sequence_embedding = actor.encode(sequence_terrain, sequence_state)
+        jepa_loss, prediction, target_embedding = actor.jepa_loss(
+            sequence_terrain, sequence_state, action_sequence, future_terrain, future_state,
+            embedding=sequence_embedding, return_details=True)
+        with torch.no_grad():
+            permutation = torch.randperm(len(action_sequence), device=device)
+            shuffled_prediction = actor.jepa_predictor(torch.cat([
+                sequence_embedding, action_sequence[permutation].flatten(1)], dim=-1))
+            jepa_shuffled = (1.0 - F.cosine_similarity(shuffled_prediction, target_embedding, dim=-1)).mean()
+            # Compare two target embeddings, so this baseline measures only
+            # temporal predictability rather than EMA-online encoder lag.
+            current_target_embedding = actor.target_encode(sequence_terrain, sequence_state)
+            jepa_identity = (1.0 - F.cosine_similarity(current_target_embedding, target_embedding, dim=-1)).mean()
+        inverse_loss = actor.inverse_loss(sequence_embedding, target_embedding, action_sequence)
+    else:
+        jepa_loss = sac_actor_loss.new_zeros(())
+        inverse_loss = jepa_shuffled = jepa_identity = sac_actor_loss.detach().new_zeros(())
+    if variance_coef > 0:
+        embedding_std_by_feature = torch.sqrt(embedding.var(dim=0, unbiased=False) + 1e-4)
+        variance_loss = torch.relu(float(cfg['training'].get('jepa_variance_target', 0.1)) - embedding_std_by_feature).mean()
+        embedding_std = embedding_std_by_feature.mean().detach()
+    else:
+        variance_loss = sac_actor_loss.new_zeros(())
+        embedding_std = sac_actor_loss.detach().new_zeros(())
+    total_actor_loss = (sac_actor_loss + jepa_coef * jepa_loss + inverse_coef * inverse_loss
+                        + variance_coef * variance_loss)
+    actor_opt.zero_grad(set_to_none=True); total_actor_loss.backward(); actor_opt.step()
+    critics.requires_grad_(True)
+    # Tune temperature from the updated policy, not the sample used for the
+    # preceding actor gradient step.
+    with torch.no_grad():
+        _, _, updated_logp, _ = actor.act(terrain, state)
+    alpha_loss = -(log_alpha * (updated_logp + float(cfg['sac']['target_entropy']))).mean()
+    alpha_opt.zero_grad(set_to_none=True); alpha_loss.backward(); alpha_opt.step()
+    with torch.no_grad():
+        for t, p in zip(target.parameters(), critics.parameters()): t.lerp_(p, float(cfg['sac']['tau']))
+    ratio = jepa_loss.detach() / jepa_shuffled.detach().clamp_min(1e-8)
+    return (float(sac_actor_loss.item()), float(total_actor_loss.item()),
+            float(critic_loss.item()), float(log_alpha.exp().item()),
+            float(jepa_loss.item()), float(inverse_loss.item()), float(variance_loss.item()), float(embedding_std.item()),
+            float(jepa_coef * jepa_loss.item()), float(variance_coef * variance_loss.item()),
+            float(inverse_coef * inverse_loss.item()), float(jepa_shuffled.item()), float(jepa_identity.item()), float(ratio.item()))
+
+
+def train_sac(cfg, device='cpu'):
+    tc, sc, seed = cfg['training'], cfg['sac'], int(cfg['training']['seed'])
+    if int(sc['learning_starts']) < int(sc['batch_size']): raise ValueError('learning_starts must be >= batch_size')
+    jepa_coef = float(tc.get('jepa_coef', 0.0))
+    if jepa_coef < 0: raise ValueError('training.jepa_coef must be non-negative')
+    jepa_inverse_coef = float(tc.get('jepa_inverse_coef', 0.0))
+    if jepa_inverse_coef < 0: raise ValueError('training.jepa_inverse_coef must be non-negative')
+    jepa_horizon = int(tc.get('jepa_horizon', 1))
+    if jepa_horizon < 1: raise ValueError('training.jepa_horizon must be positive')
+    jepa_variance_coef = float(tc.get('jepa_variance_coef', 0.0))
+    if jepa_variance_coef < 0: raise ValueError('training.jepa_variance_coef must be non-negative')
+    if jepa_coef > 0 and jepa_variance_coef <= 0:
+        warnings.warn('SAC+JEPA without a variance floor; use only as an explicit ablation.', stacklevel=2)
+    jepa_target_interval = int(tc.get('jepa_target_update_transitions', 64))
+    if jepa_target_interval < 1: raise ValueError('training.jepa_target_update_transitions must be positive')
+    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+    root = Path(cfg['output']['dump_dir']); (root / 'checkpoints').mkdir(parents=True, exist_ok=True); (root / 'metrics').mkdir(parents=True, exist_ok=True); save_config(cfg, root / 'resolved_config.yaml')
+    train_seeds = {int(cfg['terrain']['seed']) + i for i in range(int(cfg['environment']['training_terrain_count']))}
+    if train_seeds & set(cfg['environment']['evaluation_terrain_seeds']): raise ValueError('training and evaluation terrain seeds overlap')
+    bank = [generate(cfg['terrain'], s) for s in sorted(train_seeds)]; n = int(cfg['environment']['num_parallel_envs']); rng = np.random.default_rng(seed)
+    envs = [FractalEnv(cfg, bank[i % len(bank)], seed + i) for i in range(n)]; obs = [env.reset()[0] for env in envs]
+    actor = SACActor(cfg['agent']['fov_size'], jepa_enabled=jepa_coef > 0,
+                     jepa_horizon=jepa_horizon,
+                     jepa_inverse_enabled=jepa_inverse_coef > 0).to(device)
+    critics = TwinQ(cfg['agent']['fov_size']).to(device); target = deepcopy(critics).to(device); target.requires_grad_(False)
+    init_checkpoint = tc.get('init_checkpoint')
+    if init_checkpoint:
+        # A spectrum shift is a new MDP. Reuse learned representations and
+        # value functions, but intentionally start fresh optimizers/replay.
+        # This is transfer fine-tuning, not an exact training resumption.
+        source = torch.load(init_checkpoint, map_location=device, weights_only=False)
+        if source.get('algorithm') != 'sac':
+            raise ValueError('training.init_checkpoint must be an SAC checkpoint')
+        actor.load_state_dict(source['model'])
+        critics.load_state_dict(source['critics'])
+        target.load_state_dict(source.get('target_critics', source['critics']))
+        target.requires_grad_(False)
+        print(f'Initialized transfer run from {init_checkpoint}', flush=True)
+    actor_opt = torch.optim.Adam((p for p in actor.parameters() if p.requires_grad), lr=float(sc['learning_rate']))
+    critic_opt = torch.optim.Adam(critics.parameters(), lr=float(sc['learning_rate']))
+    log_alpha = torch.tensor(np.log(float(sc['initial_alpha'])), device=device, requires_grad=True); alpha_opt = torch.optim.Adam([log_alpha], lr=float(sc['learning_rate']))
+    replay, count, next_eval, next_save, speeds = ReplayBuffer(sc['buffer_size'], obs[0], seed), 0, int(tc['evaluation_interval']), int(tc['checkpoint_interval']), []
+    losses = (float('nan'),) * 14
+    loss_sum = np.zeros(14, dtype=np.float64)
+    loss_count = 0
+    transitions_since_jepa_target = 0
+    with (root / 'metrics' / 'training.csv').open('w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=['steps','rollout_mean_speed','evaluation_mean_speed','evaluation_std_speed','actor_loss','actor_total_loss','critic_loss','alpha','jepa_loss','jepa_inverse_loss','jepa_variance_loss','jepa_embedding_std','jepa_term','inverse_term','variance_term','jepa_loss_shuffled','jepa_loss_identity','jepa_real_to_shuffled_ratio']); writer.writeheader()
+        while count < int(tc['total_timesteps']):
+            active = min(n, int(tc['total_timesteps']) - count)
+            if count < int(sc['learning_starts']): actions = rng.uniform(-1, 1, (active, 2)).astype(np.float32)
+            else:
+                with torch.no_grad(): actions = actor.act(torch.as_tensor(np.stack([o['terrain'] for o in obs[:active]]), device=device), torch.as_tensor(np.stack([o['state'] for o in obs[:active]]), device=device))[0].cpu().numpy()
+            for i in range(active):
+                previous = obs[i]; next_obs, reward, term, trunc, info = envs[i].step(actions[i]); replay.add(previous, actions[i], reward, next_obs, term, ended=term or trunc); speeds.append(info['speed'])
+                if term or trunc: next_obs, _ = envs[i].reset(terrain=bank[int(rng.integers(len(bank)))])
+                obs[i] = next_obs
+            count += active
+            if count >= int(sc['learning_starts']) and replay.size >= int(sc['batch_size']):
+                for _ in range(active * int(sc.get('updates_per_step', 1))):
+                    losses = update(actor, critics, target, replay, actor_opt, critic_opt, log_alpha, alpha_opt, cfg, device)
+                    loss_sum += losses
+                    loss_count += 1
+                # Decouple the JEPA EMA lag from updates_per_step and batch
+                # size. The target moves according to collected environment
+                # transitions, not every replay gradient update.
+                if actor.jepa_enabled:
+                    transitions_since_jepa_target += active
+                    while transitions_since_jepa_target >= jepa_target_interval:
+                        actor.update_jepa_target(float(tc.get('jepa_target_tau', 0.01)))
+                        transitions_since_jepa_target -= jepa_target_interval
+            if count >= next_eval or count >= int(tc['total_timesteps']):
+                if loss_count:
+                    losses = tuple(loss_sum / loss_count)
+                mean, std = evaluate(actor, cfg, device); writer.writerow(dict(steps=count, rollout_mean_speed=float(np.mean(speeds)), evaluation_mean_speed=mean, evaluation_std_speed=std, actor_loss=losses[0], actor_total_loss=losses[1], critic_loss=losses[2], alpha=losses[3], jepa_loss=losses[4], jepa_inverse_loss=losses[5], jepa_variance_loss=losses[6], jepa_embedding_std=losses[7], jepa_term=losses[8], variance_term=losses[9], inverse_term=losses[10], jepa_loss_shuffled=losses[11], jepa_loss_identity=losses[12], jepa_real_to_shuffled_ratio=losses[13])); handle.flush(); speeds.clear(); next_eval = count + int(tc['evaluation_interval']); print(f'SAC steps={count} eval_speed={mean:.3f} jepa_loss={losses[4]:.4f} ratio={losses[13]:.3f} inverse={losses[5]:.4f}', flush=True)
+                loss_sum.fill(0.0)
+                loss_count = 0
+            if count >= next_save or count >= int(tc['total_timesteps']):
+                torch.save({'algorithm':'sac','model':actor.state_dict(),'critics':critics.state_dict(),'target_critics':target.state_dict(),'steps':count,'config':cfg}, root / 'checkpoints' / f'sac_{count:09d}.pt'); next_save = count + int(tc['checkpoint_interval'])
+    return actor
 
 
 ================================================================================
@@ -435,7 +848,11 @@ def train(cfg, device='cpu', max_steps=None):
     environments = [FractalEnv(cfg, terrain=terrain_bank[i % len(terrain_bank)], seed=seed + i)
                     for i in range(n)]
     obs = [env.reset()[0] for env in environments]
-    policy = ActorCritic(cfg['agent']['fov_size'], architecture=cfg['agent'].get('architecture', 'shared')).to(device)
+    jepa_coef = float(tc.get('jepa_coef', 0.0))
+    if jepa_coef < 0:
+        raise ValueError('training.jepa_coef must be non-negative')
+    policy = ActorCritic(cfg['agent']['fov_size'], architecture=cfg['agent'].get('architecture', 'shared'),
+                         jepa_enabled=jepa_coef > 0).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=float(tc['learning_rate']))
     target = int(max_steps if max_steps is not None else tc['total_timesteps'])
     count = 0
@@ -447,10 +864,12 @@ def train(cfg, device='cpu', max_steps=None):
         raise ValueError('training.parallel_env_workers must be positive')
     executor = ThreadPoolExecutor(max_workers=min(workers, n)) if workers > 1 else None
     with metrics.open('w', newline='') as file:
-        writer = csv.DictWriter(file, fieldnames=['steps', 'rollout_mean_speed', 'evaluation_mean_speed', 'evaluation_std_speed', 'policy_loss', 'value_loss'])
+        writer = csv.DictWriter(file, fieldnames=['steps', 'rollout_mean_speed', 'evaluation_mean_speed',
+                                                   'evaluation_std_speed', 'policy_loss', 'value_loss', 'jepa_loss'])
         writer.writeheader()
         while count < target:
-            storage = {k: [] for k in ['terrain', 'state', 'raw', 'logp', 'value', 'reward', 'next_value', 'terminated', 'ended']}
+            storage = {k: [] for k in ['terrain', 'state', 'raw', 'logp', 'value', 'reward', 'next_value',
+                                        'next_terrain', 'next_state', 'terminated', 'ended']}
             speed_samples = []
             horizon = min(int(tc['rollout_steps']), max(1, (target - count + n - 1) // n))
             for _ in range(horizon):
@@ -478,6 +897,7 @@ def train(cfg, device='cpu', max_steps=None):
                     tt, ss = tensor_obs(next_obs, device)
                     _, bootstrap = policy(tt, ss)
                     next_values = bootstrap.cpu().numpy()
+                next_terrain_np, next_state_np = tt.cpu().numpy(), ss.cpu().numpy()
                 for i, finished in enumerate(ended):
                     if finished:
                         new_terrain = terrain_bank[int(rng.integers(len(terrain_bank)))]
@@ -485,6 +905,8 @@ def train(cfg, device='cpu', max_steps=None):
                 obs = next_obs
                 storage['reward'].append(rewards)
                 storage['next_value'].append(next_values)
+                storage['next_terrain'].append(next_terrain_np)
+                storage['next_state'].append(next_state_np)
                 storage['terminated'].append(terminated)
                 storage['ended'].append(ended)
             data = {key: np.asarray(value, dtype=np.float32) for key, value in storage.items()}
@@ -495,9 +917,10 @@ def train(cfg, device='cpu', max_steps=None):
             flatten = lambda value: torch.as_tensor(value.reshape((batch_size,) + value.shape[2:]), device=device)
             terrains, states = flatten(data['terrain']), flatten(data['state'])
             raws, old_logp, old_value = flatten(data['raw']), flatten(data['logp']), flatten(data['value'])
+            next_terrains, next_states = flatten(data['next_terrain']), flatten(data['next_state'])
             adv, ret = flatten(advantages), flatten(returns)
             adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
-            policy_loss = value_loss = 0.0
+            policy_loss = value_loss = jepa_loss = 0.0
             for _ in range(int(tc['update_epochs'])):
                 for indices in torch.randperm(batch_size, device=device).split(int(tc['minibatch_size'])):
                     dist, val = policy.distribution(terrains[indices], states[indices])
@@ -514,12 +937,16 @@ def train(cfg, device='cpu', max_steps=None):
                         v_loss = 0.5 * torch.maximum((val - ret[indices]).square(),
                                                      (clipped_value - ret[indices]).square()).mean()
                     # Gaussian pre-squash entropy is a proxy, not exact squashed entropy.
-                    loss = p_loss + float(tc['value_coef']) * v_loss - float(tc['entropy_coef']) * dist.entropy().sum(-1).mean()
+                    j_loss = policy.jepa_loss(terrains[indices], states[indices], torch.tanh(raws[indices]),
+                                              next_terrains[indices], next_states[indices])
+                    loss = (p_loss + float(tc['value_coef']) * v_loss
+                            - float(tc['entropy_coef']) * dist.entropy().sum(-1).mean() + jepa_coef * j_loss)
                     optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(policy.parameters(), float(tc['max_grad_norm']))
                     optimizer.step()
-                    policy_loss, value_loss = float(p_loss.item()), float(v_loss.item())
+                    policy.update_jepa_target(float(tc.get('jepa_target_tau', 0.01)))
+                    policy_loss, value_loss, jepa_loss = float(p_loss.item()), float(v_loss.item()), float(j_loss.item())
             count += horizon * n
             mean_eval = std_eval = float('nan')
             if count >= next_eval or count >= target:
@@ -533,7 +960,7 @@ def train(cfg, device='cpu', max_steps=None):
                 next_checkpoint = count + int(tc['checkpoint_interval'])
             writer.writerow(dict(steps=count, rollout_mean_speed=float(np.mean(speed_samples)),
                                  evaluation_mean_speed=mean_eval, evaluation_std_speed=std_eval,
-                                 policy_loss=policy_loss, value_loss=value_loss))
+                                 policy_loss=policy_loss, value_loss=value_loss, jepa_loss=jepa_loss))
             file.flush()
             eval_label = f'{mean_eval:.3f}' if np.isfinite(mean_eval) else 'pending'
             print(f'steps={count} rollout_speed={np.mean(speed_samples):.3f} eval_speed={eval_label}', flush=True)
@@ -546,8 +973,16 @@ def load_policy(path, device='cpu', trusted_legacy=False):
     """Load an inference checkpoint without unpickling arbitrary Python by default."""
     checkpoint = torch.load(path, map_location=device, weights_only=not trusted_legacy)
     cfg = checkpoint['config']
-    # Checkpoints saved before the architecture option are the original shared model.
-    policy = ActorCritic(cfg['agent']['fov_size'], architecture=cfg['agent'].get('architecture', 'shared')).to(device)
+    if checkpoint.get('algorithm', 'ppo') == 'sac':
+        from src.rl.sac import SACActor
+        policy = SACActor(cfg['agent']['fov_size'],
+                          jepa_enabled=float(cfg['training'].get('jepa_coef', 0.0)) > 0,
+                          jepa_horizon=int(cfg['training'].get('jepa_horizon', 1)),
+                          jepa_inverse_enabled=float(cfg['training'].get('jepa_inverse_coef', 0.0)) > 0).to(device)
+    else:
+        # Checkpoints saved before the architecture option are the original shared model.
+        policy = ActorCritic(cfg['agent']['fov_size'], architecture=cfg['agent'].get('architecture', 'shared'),
+                             jepa_enabled=float(cfg['training'].get('jepa_coef', 0.0)) > 0).to(device)
     policy.load_state_dict(checkpoint['model'])
     policy.eval()
     return policy, cfg
@@ -1011,7 +1446,8 @@ def main():
         rows.append({'step': step, 'x': position[0], 'y': position[1],
                      'speed': speed, 'potential': potential,
                      'action_forward': action[0, 0].item(), 'action_right': action[0, 1].item(),
-                     'value': value.item(),
+                     # SAC has no state-value head; retain a stable CSV schema.
+                     'value': float('nan') if value is None else value.item(),
                      'control_acceleration': np.linalg.norm(control_acc),
                      'potential_acceleration': np.linalg.norm(potential_acc),
                      'damping_acceleration': np.linalg.norm(damping_acc),
@@ -1111,6 +1547,34 @@ def main():
     fig.savefig(history, dpi=180)
     plt.close(fig)
 
+    # Complete dynamics view: physical/latent velocity, controls, all
+    # acceleration magnitudes, and velocity-frame field/control components.
+    fig, axes = plt.subplots(5, 1, figsize=(11, 12), sharex=True, constrained_layout=True)
+    axes[0].plot(time, speed, color='#0f766e', label='physical speed')
+    twin = axes[0].twinx()
+    twin.plot(time, values['latent_velocity'], color='#7c3aed', alpha=.85, label='latent velocity')
+    axes[0].set(title='Physical and encoder velocity', ylabel='speed')
+    twin.set_ylabel('latent velocity')
+    axes[0].legend(loc='upper left', frameon=False); twin.legend(loc='upper right', frameon=False)
+    axes[1].plot(time, values['action_forward'], label='forward command', color='#0f766e')
+    axes[1].plot(time, values['action_right'], label='right command', color='#ea580c')
+    axes[1].set(title='Deterministic controls', ylabel='normalized action'); axes[1].legend(ncol=2, frameon=False)
+    axes[2].plot(time, values['control_acceleration'], label='control', color='#0f766e')
+    axes[2].plot(time, values['potential_acceleration'], label='potential field', color='#7c3aed')
+    axes[2].plot(time, values['damping_acceleration'], label='damping', color='#64748b')
+    axes[2].plot(time, values['net_acceleration'], label='net', color='#ef4444')
+    axes[2].set(title='Acceleration magnitudes', ylabel='acceleration'); axes[2].legend(ncol=4, frameon=False)
+    axes[3].plot(time, values['input_parallel_acceleration'], label='input', color='#0f766e')
+    axes[3].plot(time, values['potential_parallel_acceleration'], label='potential', color='#7c3aed')
+    axes[3].axhline(0, color='#94a3b8', linewidth=.7); axes[3].set(title='Parallel acceleration', ylabel='signed acceleration'); axes[3].legend(ncol=2, frameon=False)
+    axes[4].plot(time, values['input_perpendicular_acceleration'], label='input', color='#0f766e')
+    axes[4].plot(time, values['potential_perpendicular_acceleration'], label='potential', color='#7c3aed')
+    axes[4].axhline(0, color='#94a3b8', linewidth=.7); axes[4].set(title='Perpendicular acceleration', xlabel='environment step', ylabel='signed acceleration'); axes[4].legend(ncol=2, frameon=False)
+    for axis in axes: axis.grid(alpha=.25)
+    dynamics = paths['dynamics_plot']
+    fig.savefig(dynamics, dpi=180)
+    plt.close(fig)
+
     # One complete episode diagnostic per dumped checkpoint.  Keep the smaller
     # legacy views above, but make this self-contained panel the default report
     # figure: map/UMAP correspondence, latent velocity, steering, and both
@@ -1160,7 +1624,216 @@ def main():
     plt.close(fig)
     print(figure)
     print(history)
+    print(dynamics)
     print(episode)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/build_dense_landscape_dashboard.py
+================================================================================
+
+"""GPU PCA and 3-D UMAP landscape dashboards for every saved checkpoint.
+
+Consumes dense latent dumps made by ``plot_dense_latent_maps`` and rebuilds a
+joint cuML PCA and UMAP over *all* 256x256 map observations from one run.
+Each HTML file has potential plus path, PCA-RGB landscape, 3-D PCA trajectory,
+and a rotatable 3-D UMAP.  The UMAP background is every dense observation;
+only visited states are highlighted, with no misleading UMAP trajectory chords.
+"""
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from src.rl.trainer import load_policy
+from src.terrain.periodic_field import sample
+from src.terrain.pink_noise import generate
+from driver.plot_dense_latent_maps import infer_trajectory
+
+
+def checkpoint_step(path):
+    return int(path.stem.rsplit('_', 1)[-1])
+
+
+def as_numpy(value):
+    """Materialise NumPy, CuPy, and cuDF outputs without hard-coding a type."""
+    if hasattr(value, 'to_numpy'):
+        return value.to_numpy()
+    try:
+        import cupy as cp
+        if isinstance(value, cp.ndarray):
+            return cp.asnumpy(value)
+    except ImportError:
+        pass
+    return np.asarray(value)
+
+
+def gpu_umap(values, seed):
+    try:
+        from cuml.manifold import UMAP
+    except ImportError as error:
+        raise RuntimeError('This dashboard requires cuML; run it in the GPU environment.') from error
+    mapper = UMAP(n_components=3, n_neighbors=30, min_dist=.1, metric='euclidean',
+                  random_state=seed)
+    embedded = as_numpy(mapper.fit_transform(values)).astype(np.float32)
+    return mapper, embedded
+
+
+def gpu_pca(values):
+    try:
+        from cuml.decomposition import PCA
+    except ImportError as error:
+        raise RuntimeError('This dashboard requires cuML; run it in the GPU environment.') from error
+    mapper = PCA(n_components=3)
+    embedded = as_numpy(mapper.fit_transform(values)).astype(np.float32)
+    return mapper, embedded
+
+
+def rgb(embedding, low, high):
+    return np.clip((embedding - low) / np.maximum(high - low, 1e-6), 0, 1)
+
+
+def potential_grid(terrain, centre, resolution):
+    offsets = (np.arange(resolution, dtype=np.float64) + .5 - resolution / 2) * terrain.pixel_size
+    x, y = np.meshgrid(centre[0] + offsets, centre[1] + offsets)
+    return sample(terrain.potential, x, y, terrain.pixel_size), resolution * terrain.pixel_size
+
+
+def dashboard(destination, potential, width, pca_rgb_map, dense_pca, visited_pca,
+              dense_umap, visited_umap, visited_position, step):
+    extent = (-width / 2, width / 2)
+    figure = make_subplots(rows=1, cols=4,
+                           specs=[[{'type': 'xy'}, {'type': 'xy'}, {'type': 'scene'}, {'type': 'scene'}]],
+                           column_widths=[.24, .24, .26, .26],
+                           subplot_titles=('Potential and visited path',
+                                           'PCA-to-RGB landscape',
+                                           '3-D PCA: dense background + trajectory',
+                                           '3-D UMAP: dense background + visited states'))
+    figure.add_trace(go.Heatmap(z=potential, colorscale='Viridis', reversescale=True,
+                                 showscale=False, x=np.linspace(*extent, potential.shape[1]),
+                                 y=np.linspace(*extent, potential.shape[0]), hoverinfo='skip'), row=1, col=1)
+    figure.add_trace(go.Scatter(x=visited_position[:, 0], y=visited_position[:, 1], mode='lines',
+                                line=dict(color='white', width=2), hoverinfo='skip', showlegend=False), row=1, col=1)
+    figure.add_trace(go.Scatter(x=[visited_position[0, 0]], y=[visited_position[0, 1]], mode='markers',
+                                marker=dict(size=8, color='#ef4444', line=dict(color='#111827', width=1)),
+                                name='episode start'), row=1, col=1)
+    figure.add_trace(go.Image(z=np.uint8(np.clip(pca_rgb_map, 0, 1) * 255), hoverinfo='skip'), row=1, col=2)
+    figure.add_trace(go.Scatter(x=visited_position[:, 0] + width / 2, y=width / 2 - visited_position[:, 1],
+                                mode='lines', line=dict(color='white', width=2), hoverinfo='skip', showlegend=False), row=1, col=2)
+    # PCA is linear, so joining temporally consecutive visited points is
+    # meaningful. The dense background gives its global geometry.
+    figure.add_trace(go.Scatter3d(x=dense_pca[:, 0], y=dense_pca[:, 1], z=dense_pca[:, 2], mode='markers',
+                                  marker=dict(size=1.6, color='#64748b'), opacity=.38,
+                                  hoverinfo='skip', name='all map states (PCA)'), row=1, col=3)
+    time = np.arange(len(visited_pca))
+    figure.add_trace(go.Scatter3d(x=visited_pca[:, 0], y=visited_pca[:, 1], z=visited_pca[:, 2], mode='lines',
+                                  line=dict(color='#111827', width=3), hoverinfo='skip', showlegend=False), row=1, col=3)
+    figure.add_trace(go.Scatter3d(x=visited_pca[:, 0], y=visited_pca[:, 1], z=visited_pca[:, 2], mode='markers',
+                                  marker=dict(size=4.5, color=time, colorscale='Plasma', showscale=False),
+                                  hovertemplate='visited step %{marker.color}<extra>PCA trajectory</extra>',
+                                  name='visited trajectory (PCA)'), row=1, col=3)
+    # All 65,536 grid observations are rendered as a subdued cloud.  No path
+    # line is drawn in UMAP: it creates false long-range chords when the
+    # manifold folds.  Visited states alone are colour-coded and hoverable.
+    figure.add_trace(go.Scatter3d(x=dense_umap[:, 0], y=dense_umap[:, 1], z=dense_umap[:, 2], mode='markers',
+                                  # Scatter3d does not reliably honour alpha in
+                                  # an rgba marker colour.  Trace opacity makes
+                                  # the full 65,536-point cloud visibly gray.
+                                  marker=dict(size=1.7, color='#64748b'), opacity=.42,
+                                  hoverinfo='skip', name='all 65,536 map states (UMAP)'), row=1, col=4)
+    time = np.arange(len(visited_umap))
+    figure.add_trace(go.Scatter3d(x=visited_umap[:, 0], y=visited_umap[:, 1], z=visited_umap[:, 2], mode='markers',
+                                  marker=dict(size=5.2, color=time, colorscale='Plasma', showscale=True,
+                                              colorbar=dict(title='visited step', len=.72)),
+                                  customdata=np.column_stack((time, visited_position)),
+                                  hovertemplate='step %{customdata[0]}<br>x=%{customdata[1]:.2f}<br>'
+                                                'y=%{customdata[2]:.2f}<extra>visited</extra>',
+                                  name='visited states'), row=1, col=4)
+    figure.update_xaxes(range=extent, scaleanchor='y', scaleratio=1, title='relative x', row=1, col=1)
+    figure.update_yaxes(range=extent, title='relative y', row=1, col=1)
+    figure.update_xaxes(visible=False, row=1, col=2)
+    figure.update_yaxes(visible=False, row=1, col=2)
+    figure.update_layout(title=f'Dense 256×256 latent landscape — checkpoint {step:,}', height=700, width=2200,
+                         template='plotly_white', margin=dict(l=20, r=20, t=70, b=20),
+                         legend=dict(orientation='h', y=-.04),
+                         scene=dict(xaxis=dict(title='PC 1', showgrid=False, zeroline=False),
+                                    yaxis=dict(title='PC 2', showgrid=False, zeroline=False),
+                                    zaxis=dict(title='PC 3', showgrid=False, zeroline=False),
+                                    bgcolor='white', aspectmode='data'),
+                         scene2=dict(xaxis=dict(title='UMAP 1', showgrid=False, zeroline=False),
+                                     yaxis=dict(title='UMAP 2', showgrid=False, zeroline=False),
+                                     zaxis=dict(title='UMAP 3', showgrid=False, zeroline=False),
+                                     bgcolor='white', aspectmode='data'))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure.write_html(destination, include_plotlyjs=True, full_html=True)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('run_dir', help='dump directory with checkpoints/ and dense_latents/')
+    parser.add_argument('--seed', type=int, default=100001)
+    parser.add_argument('--limit', type=int, default=5)
+    parser.add_argument('--device', default='cuda')
+    args = parser.parse_args()
+    root = Path(args.run_dir)
+    checkpoints = sorted([*(root / 'checkpoints').glob('sac_*.pt'), *(root / 'checkpoints').glob('ppo_*.pt')],
+                         key=checkpoint_step)
+    if not checkpoints:
+        raise FileNotFoundError(f'No checkpoints in {root / "checkpoints"}')
+    if len(checkpoints) > args.limit:
+        indices = np.unique(np.linspace(0, len(checkpoints) - 1, args.limit, dtype=int))
+        checkpoints = [checkpoints[index] for index in indices]
+    policy, cfg = load_policy(checkpoints[-1], args.device)
+    del policy
+    dense_dir = root / 'dense_latents'
+    cases = []
+    for checkpoint in checkpoints:
+        path = dense_dir / f'dense_latent_{checkpoint.stem}_seed{args.seed}.npz'
+        if not path.exists():
+            raise FileNotFoundError(f'Missing dense latent dump {path}; run plot_dense_latent_maps first.')
+        data = np.load(path)
+        cases.append((checkpoint, checkpoint_step(checkpoint), data['latent'].astype(np.float32),
+                      data['visited_position'].astype(np.float32), data['centre'].astype(np.float64)))
+    all_latent = np.concatenate([case[2] for case in cases])
+    pca_mapper, all_pca = gpu_pca(all_latent)
+    umap_mapper, all_umap = gpu_umap(all_latent, cfg['training']['seed'])
+    pca_low, pca_high = np.percentile(all_pca, (1, 99), axis=0)
+    terrain = generate(cfg['terrain'], seed=args.seed)
+    dashboard_dir = root / 'dashboard'
+    offset = 0
+    entries = []
+    for checkpoint, step, latent, visited_position, centre in cases:
+        count = len(latent)
+        dense_pca, dense_umap = all_pca[offset:offset + count], all_umap[offset:offset + count]
+        offset += count
+        # Recompute the actual deterministic visited states rather than using
+        # an incompatible projection saved by a previous UMAP fit.
+        policy, _ = load_policy(checkpoint, args.device)
+        _, current_position, visited_latent = infer_trajectory(policy, terrain, cfg, args.seed, 2000, args.device)
+        visited_position = current_position - centre
+        visited_pca = as_numpy(pca_mapper.transform(visited_latent)).astype(np.float32)
+        visited_umap = as_numpy(umap_mapper.transform(visited_latent)).astype(np.float32)
+        pca_rgb_map = rgb(dense_pca, pca_low, pca_high).reshape(256, 256, 3)
+        potential, width = potential_grid(terrain, centre, 256)
+        filename = f'dense_landscape_umap_{step:09d}_seed{args.seed}.html'
+        dashboard(dashboard_dir / filename, potential, width, pca_rgb_map, dense_pca, visited_pca,
+                  dense_umap, visited_umap, visited_position, step)
+        entries.append((step, filename))
+        print(dashboard_dir / filename, flush=True)
+    links = '\n'.join(f'<li><a href="{name}">{step:,} transitions</a></li>' for step, name in entries)
+    (dashboard_dir / 'index.html').write_text('<!doctype html><title>Dense latent landscapes</title>'
+        '<h1>Dense latent landscapes</h1><p>Both 3-D panels are rotatable. Gray = all map states; '
+        'plasma = actually visited trajectory states. PCA connects the visited trajectory; UMAP does not.</p><ul>' + links + '</ul>')
+    (dashboard_dir / 'manifest.json').write_text(json.dumps({'seed': args.seed, 'checkpoints': entries,
+        'backend': 'cuml.PCA + cuml.UMAP', 'dense_background_points_per_checkpoint': 256 ** 2}, indent=2) + '\n')
+    print(dashboard_dir / 'index.html')
 
 
 if __name__ == '__main__':
@@ -1383,6 +2056,74 @@ if __name__ == '__main__':
 
 
 ================================================================================
+FILE: driver/flush_analysis.py
+================================================================================
+
+"""Run the complete default visualization pipeline for one training run.
+
+This is the standard post-training flush: curve (including JEPA loss),
+deterministic inference, UMAP, episode diagnostics, pairwise UMAP, CKA, dense
+spatial latent RGB maps, and a machine-readable manifest. Run from the project
+root.
+"""
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+from src.rl.trainer import load_policy
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('run_dir', help='training dump directory containing checkpoints/ and metrics/')
+    parser.add_argument('--device', default='cpu')
+    args = parser.parse_args()
+    root = Path(args.run_dir)
+    checkpoints = sorted([*(root / 'checkpoints').glob('ppo_*.pt'), *(root / 'checkpoints').glob('sac_*.pt')])
+    if not checkpoints:
+        raise FileNotFoundError(f'no checkpoints in {root / "checkpoints"}')
+    _, cfg = load_policy(checkpoints[-1], args.device)
+    ac = cfg['analysis']
+    latest = checkpoints[-1]
+    prefix = checkpoints[-1].stem.split('_', 1)[0]
+    jepa_enabled = float(cfg['training'].get('jepa_coef', 0.0)) > 0
+    algorithm_label = prefix.upper() + ('+JEPA' if jepa_enabled else '')
+    checkpoint_glob = str(root / 'checkpoints' / f'{prefix}_*.pt')
+    commands = [
+        ['-m', 'driver.plot_training', '--metrics', str(root / 'metrics' / 'training.csv'),
+         '--output', str(root / 'plots' / 'learning_curve.png'), '--algorithm', algorithm_label],
+        ['-m', 'driver.analyze_latent', str(latest), '--device', args.device,
+         '--seed', str(ac['inference_seed']), '--steps', str(ac['inference_steps']), '--output-dir', str(root)],
+        ['-m', 'driver.analyze_checkpoints', checkpoint_glob, '--device', args.device,
+         '--seed', str(ac['inference_seed']), '--steps', str(ac['inference_steps']),
+         '--limit', str(ac['pairwise_limit']), '--output-dir', str(root)],
+        ['-m', 'driver.compare_checkpoint_umaps', checkpoint_glob, '--device', args.device,
+         '--seed', str(ac['inference_seed']), '--steps', str(ac['pairwise_steps']),
+         '--limit', str(ac['pairwise_limit']), '--plot-size', str(ac['pairwise_plot_size']), '--output-dir', str(root)],
+        ['-m', 'driver.plot_dense_latent_maps', checkpoint_glob, '--device', args.device,
+         '--seed', str(ac['inference_seed']), '--steps', str(ac['inference_steps']),
+         '--resolution', str(ac.get('dense_map_resolution', 256)),
+         '--batch-size', str(ac.get('dense_map_batch_size', 256)),
+         '--limit', str(ac['pairwise_limit']), '--output-dir', str(root)],
+    ]
+    for command in commands:
+        subprocess.run([sys.executable, *command], check=True)
+    manifest = {
+        'checkpoint_count': len(checkpoints), 'latest_checkpoint': str(latest),
+        'analysis_config': ac,
+        'artifacts': [str(path.relative_to(root)) for path in sorted((root / 'plots').glob('*.png'))],
+    }
+    (root / 'analysis_manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    print(root / 'analysis_manifest.json')
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
 FILE: driver/generate_terrain.py
 ================================================================================
 
@@ -1474,6 +2215,263 @@ if __name__ == '__main__':
 
 
 ================================================================================
+FILE: driver/plot_dense_latent_maps.py
+================================================================================
+
+"""Dense spatial latent maps with a shared RGB embedding across checkpoints.
+
+The probe is a fixed 256-by-256 world-unit tile centred at the deterministic
+held-out start.  Every spatial location is observed with the same initial
+proprioceptive state, so RGB variation shows what each encoder maps from the
+local potential patch rather than changes in velocity or previous action.
+All checkpoints in one invocation share a PCA-to-RGB transform and colour
+limits, making changes over training directly comparable.
+"""
+import argparse
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from src.env.fractal_env import FractalEnv
+from src.env.observation import observe
+from src.rl.policy import tensor_obs
+from src.rl.trainer import load_policy
+from src.terrain.periodic_field import sample
+from src.terrain.pink_noise import generate
+
+
+def checkpoint_step(path):
+    return int(path.stem.rsplit('_', 1)[-1])
+
+
+def checkpoints_from_glob(pattern, limit):
+    candidate = Path(pattern)
+    paths = sorted(candidate.parent.glob(candidate.name), key=checkpoint_step)
+    if not paths:
+        raise FileNotFoundError(f'No checkpoints match {pattern!r}')
+    if len(paths) <= limit:
+        return paths
+    indices = np.unique(np.linspace(0, len(paths) - 1, limit, dtype=int))
+    return [paths[index] for index in indices]
+
+
+def dense_observations(terrain, cfg, centre, initial_body, resolution, batch_size):
+    """Yield fixed-state local-potential observations over one physical square."""
+    width = resolution * terrain.pixel_size
+    offset = (np.arange(resolution, dtype=np.float64) + 0.5 - resolution / 2) * terrain.pixel_size
+    coordinate_x, coordinate_y = centre[0] + offset, centre[1] + offset
+    xx, yy = np.meshgrid(coordinate_x, coordinate_y)
+    locations = np.column_stack((xx.ravel(), yy.ravel()))
+    reference = observe(initial_body, terrain, cfg['agent'], np.zeros(2, dtype=np.float32))
+    fixed_state = reference['state']
+    size = int(cfg['agent']['fov_size'])
+    pixel = float(cfg['agent']['fov_pixel_size'])
+    offsets = (np.arange(size, dtype=np.float64) - (size - 1) / 2) * pixel
+    horizontal, vertical = np.meshgrid(offsets, -offsets)
+    frame = cfg['agent'].get('observation_frame', 'velocity')
+    if frame == 'world':
+        forward = np.array([0.0, 1.0])
+    else:
+        speed = float(np.linalg.norm(initial_body.velocity))
+        epsilon = float(cfg['physics']['heading_epsilon'])
+        forward = (initial_body.velocity / speed if speed > epsilon else
+                   np.array([np.cos(initial_body.heading), np.sin(initial_body.heading)]))
+    right = np.array([forward[1], -forward[0]])
+    if cfg['agent'].get('steering_convention', 'left') == 'left':
+        right = -right
+    for start in range(0, len(locations), batch_size):
+        position = locations[start:start + batch_size]
+        x = position[:, 0, None, None] + horizontal * right[0] + vertical * forward[0]
+        y = position[:, 1, None, None] + horizontal * right[1] + vertical * forward[1]
+        patches = sample(terrain.potential, x, y, terrain.pixel_size).astype(np.float32)[:, None]
+        yield locations[start:start + batch_size], patches, np.repeat(fixed_state[None], len(position), axis=0)
+
+
+def encode_grid(policy, terrain, cfg, centre, initial_body, resolution, batch_size, device):
+    values = []
+    with torch.no_grad():
+        for _, patches, states in dense_observations(terrain, cfg, centre, initial_body, resolution, batch_size):
+            values.append(policy.encode(torch.as_tensor(patches, device=device),
+                                        torch.as_tensor(states, device=device)).cpu().numpy())
+    return np.concatenate(values).astype(np.float32)
+
+
+def infer_trajectory(policy, terrain, cfg, seed, steps, device):
+    env = FractalEnv(cfg, terrain=terrain, seed=seed)
+    observation, _ = env.reset(seed=seed)
+    initial_body = type(env.body)(env.body.position.copy(), env.body.velocity.copy(), env.body.heading, env.body.mass)
+    positions, latents = [], []
+    for _ in range(steps):
+        with torch.no_grad():
+            terrain_t, state_t = tensor_obs([observation], device)
+            latents.append(policy.encode(terrain_t, state_t)[0].cpu().numpy())
+            action, _, _, _ = policy.act(terrain_t, state_t, deterministic=True)
+        positions.append(env.body.position.copy())
+        observation, _, terminated, truncated, _ = env.step(action[0].cpu().numpy())
+        if terminated or truncated:
+            break
+    return initial_body, np.asarray(positions, dtype=np.float32), np.asarray(latents, dtype=np.float32)
+
+
+def initial_body_for_probe(cfg, terrain, seed):
+    """Recreate the deterministic held-out reset without taking an environment step."""
+    env = FractalEnv(cfg, terrain=terrain, seed=seed)
+    env.reset(seed=seed)
+    return type(env.body)(env.body.position.copy(), env.body.velocity.copy(), env.body.heading, env.body.mass)
+
+
+def fit_rgb(samples):
+    """PCA via SVD; percentile scaling makes one RGB legend valid for every epoch."""
+    mean = samples.mean(axis=0)
+    _, _, vectors = np.linalg.svd(samples - mean, full_matrices=False)
+    components = vectors[:3]
+    projected = (samples - mean) @ components.T
+    low, high = np.percentile(projected, (1, 99), axis=0)
+    return mean.astype(np.float32), components.astype(np.float32), low.astype(np.float32), high.astype(np.float32)
+
+
+def to_rgb(values, mean, components, low, high):
+    projected = (values - mean) @ components.T
+    rgb = np.clip((projected - low) / np.maximum(high - low, 1e-6), 0, 1)
+    return projected.astype(np.float32), rgb.astype(np.float32)
+
+
+def fit_umap(samples, seed):
+    """One shared 3-D UMAP coordinate system for all dense epoch probes."""
+    try:
+        import umap
+    except ImportError as error:
+        raise RuntimeError('Dense latent UMAP requires umap-learn.') from error
+    normalized_mean = samples.mean(axis=0)
+    normalized_scale = np.maximum(samples.std(axis=0), 1e-6)
+    mapper = umap.UMAP(n_components=3, n_neighbors=min(30, len(samples) - 1),
+                       min_dist=0.1, metric='euclidean', random_state=seed)
+    mapper.fit((samples - normalized_mean) / normalized_scale)
+    return mapper, normalized_mean.astype(np.float32), normalized_scale.astype(np.float32)
+
+
+def plot_checkpoint(destination, potential, rgb_grid, positions, visited_rgb, dense_umap, visited_umap, step, width):
+    figure = plt.figure(figsize=(14.2, 4.4), constrained_layout=True)
+    map_axis = figure.add_subplot(1, 3, 1)
+    rgb_axis = figure.add_subplot(1, 3, 2)
+    scatter_axis = figure.add_subplot(1, 3, 3, projection='3d')
+    extent = (-width / 2, width / 2, -width / 2, width / 2)
+    map_axis.imshow(potential, cmap='viridis_r', origin='lower', extent=extent)
+    map_axis.plot(positions[:, 0], positions[:, 1], color='white', linewidth=1.1, alpha=.9)
+    map_axis.scatter(positions[0, 0], positions[0, 1], s=24, color='#ef4444', edgecolor='black', zorder=3)
+    map_axis.set(title='Potential with visited trajectory', xlabel='relative x', ylabel='relative y', aspect='equal')
+    rgb_axis.imshow(rgb_grid, origin='lower', extent=extent)
+    rgb_axis.plot(positions[:, 0], positions[:, 1], color='white', linewidth=.9, alpha=.85)
+    rgb_axis.scatter(positions[:, 0], positions[:, 1], s=4, c=visited_rgb, edgecolor='white', linewidth=.08, zorder=3)
+    rgb_axis.set(title='Dense encoder map (shared PCA-to-RGB)', xlabel='relative x', ylabel='relative y', aspect='equal')
+    # All 65,536 fixed-state observations form the UMAP background.  The
+    # trajectory samples use colour by time and a dark edge, so they remain
+    # legible rather than being mistaken for a PCA/RGB plot.
+    scatter_axis.scatter(dense_umap[:, 0], dense_umap[:, 1], dense_umap[:, 2],
+                         s=.35, color='#94a3b8', alpha=.075, depthshade=False, rasterized=True)
+    time = np.arange(len(visited_umap))
+    visited_plot = scatter_axis.scatter(visited_umap[:, 0], visited_umap[:, 1], visited_umap[:, 2],
+                                        c=time, cmap='plasma', s=11, edgecolor='#111827', linewidth=.15,
+                                        depthshade=False, zorder=3)
+    scatter_axis.plot(visited_umap[:, 0], visited_umap[:, 1], visited_umap[:, 2],
+                      color='#111827', linewidth=.45, alpha=.65, zorder=2)
+    figure.colorbar(visited_plot, ax=scatter_axis, shrink=.62, pad=.08, label='visited step')
+    scatter_axis.set(title='3-D UMAP: dense background + visited states', xlabel='UMAP 1', ylabel='UMAP 2', zlabel='UMAP 3')
+    figure.suptitle(f'Dense 256×256 encoder probe, checkpoint {step:,}', fontsize=14)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(destination, dpi=180)
+    plt.close(figure)
+
+
+def plot_evolution(destination, rows, columns=5):
+    columns = min(columns, len(rows))
+    height = int(np.ceil(len(rows) / columns))
+    figure, axes = plt.subplots(height, columns, figsize=(3.2 * columns, 3.4 * height), squeeze=False, constrained_layout=True)
+    for axis in axes.flat:
+        axis.set_visible(False)
+    for axis, (step, rgb, positions, width) in zip(axes.flat, rows):
+        axis.set_visible(True)
+        extent = (-width / 2, width / 2, -width / 2, width / 2)
+        axis.imshow(rgb, origin='lower', extent=extent)
+        axis.plot(positions[:, 0], positions[:, 1], color='white', linewidth=.75)
+        axis.set(title=f'{step / 1000:g}k', xticks=[], yticks=[], aspect='equal')
+    figure.suptitle('Dense latent-RGB map evolution (one shared PCA color basis)', fontsize=14)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(destination, dpi=180)
+    plt.close(figure)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('checkpoints', help='glob such as dumps/run/checkpoints/sac_*.pt')
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--seed', type=int, default=100001)
+    parser.add_argument('--steps', type=int, default=2000)
+    parser.add_argument('--resolution', type=int, default=256)
+    parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--limit', type=int, default=5)
+    parser.add_argument('--output-dir', required=True)
+    args = parser.parse_args()
+    if min(args.steps, args.resolution, args.batch_size, args.limit) < 1:
+        parser.error('steps, resolution, batch-size, and limit must be positive')
+    checkpoints = checkpoints_from_glob(args.checkpoints, args.limit)
+    policy, cfg = load_policy(checkpoints[-1], args.device)
+    terrain = generate(cfg['terrain'], seed=args.seed)
+    initial_body = initial_body_for_probe(cfg, terrain, args.seed)
+    centre = initial_body.position.copy()
+    width = args.resolution * terrain.pixel_size
+    dense = []
+    trajectories = []
+    for checkpoint in checkpoints:
+        policy, checkpoint_cfg = load_policy(checkpoint, args.device)
+        if checkpoint_cfg['terrain'] != cfg['terrain'] or checkpoint_cfg['agent'] != cfg['agent']:
+            raise ValueError('all checkpoints must use the same terrain and agent configuration')
+        body, positions, latents = infer_trajectory(policy, terrain, cfg, args.seed, args.steps, args.device)
+        dense.append(encode_grid(policy, terrain, cfg, centre, body, args.resolution, args.batch_size, args.device))
+        trajectories.append((positions, latents))
+        print(f'encoded checkpoint {checkpoint_step(checkpoint):,}', flush=True)
+    rng = np.random.default_rng(cfg['training']['seed'])
+    sample_size = min(8192, args.resolution * args.resolution)
+    samples = np.concatenate([values[rng.choice(len(values), sample_size, replace=False)] for values in dense])
+    mean, components, low, high = fit_rgb(samples)
+    mapper, umap_mean, umap_scale = fit_umap(samples, cfg['training']['seed'])
+    root = Path(args.output_dir)
+    dense_dir, plot_dir = root / 'dense_latents', root / 'plots'
+    dense_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    evolution = []
+    grid_offset = (np.arange(args.resolution, dtype=np.float64) + .5 - args.resolution / 2) * terrain.pixel_size
+    grid_x, grid_y = np.meshgrid(centre[0] + grid_offset, centre[1] + grid_offset)
+    potential = sample(terrain.potential, grid_x, grid_y, terrain.pixel_size)
+    for checkpoint, grid, (positions, visited) in zip(checkpoints, dense, trajectories):
+        projected, rgb = to_rgb(grid, mean, components, low, high)
+        visited_projected, visited_rgb = to_rgb(visited, mean, components, low, high)
+        dense_umap = mapper.transform((grid - umap_mean) / umap_scale).astype(np.float32)
+        visited_umap = mapper.transform((visited - umap_mean) / umap_scale).astype(np.float32)
+        relative = positions - centre
+        stem = f'{checkpoint.stem}_seed{args.seed}'
+        np.savez_compressed(dense_dir / f'dense_latent_{stem}.npz', latent=grid, pca=projected,
+                            rgb=rgb, visited_position=relative, visited_pca=visited_projected,
+                            visited_rgb=visited_rgb, dense_umap=dense_umap, visited_umap=visited_umap,
+                            centre=centre, pca_mean=mean,
+                            pca_components=components, pca_low=low, pca_high=high)
+        plot_checkpoint(plot_dir / f'dense_latent_umap_{stem}.png', potential,
+                        rgb.reshape(args.resolution, args.resolution, 3), relative, visited_rgb,
+                        dense_umap, visited_umap, checkpoint_step(checkpoint), width)
+        evolution.append((checkpoint_step(checkpoint), rgb.reshape(args.resolution, args.resolution, 3), relative, width))
+    plot_evolution(plot_dir / f'dense_latent_rgb_evolution_{len(checkpoints)}x_seed{args.seed}.png', evolution)
+    print(plot_dir / f'dense_latent_rgb_evolution_{len(checkpoints)}x_seed{args.seed}.png')
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
 FILE: driver/plot_episode_diagnostics.py
 ================================================================================
 
@@ -1506,6 +2504,64 @@ def main():
   for aa in ax.flat: aa.grid(alpha=.2) if aa is not ax[1,1] else None
   dest=out/f'episode_diagnostics_{ckpt.stem}_seed{a.seed}.png'; fig.savefig(dest,dpi=180); plt.close(fig); print(dest)
 if __name__=='__main__': main()
+
+
+================================================================================
+FILE: driver/plot_jepa_diagnostics.py
+================================================================================
+
+"""Plot held-out performance and action-conditioning diagnostics from SAC+JEPA metrics."""
+import argparse
+import csv
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def column(rows, name):
+    return np.asarray([float(row[name]) for row in rows])
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--metrics', required=True)
+    parser.add_argument('--output', required=True)
+    args = parser.parse_args()
+    rows = list(csv.DictReader(Path(args.metrics).open()))
+    required = {'steps', 'evaluation_mean_speed', 'evaluation_std_speed', 'jepa_loss',
+                'jepa_loss_shuffled', 'jepa_real_to_shuffled_ratio', 'jepa_inverse_loss'}
+    missing = required - set(rows[0])
+    if missing:
+        raise ValueError(f'missing V3 diagnostic columns: {sorted(missing)}')
+    steps = column(rows, 'steps')
+    speed, speed_std = column(rows, 'evaluation_mean_speed'), column(rows, 'evaluation_std_speed')
+    real, shuffled = column(rows, 'jepa_loss'), column(rows, 'jepa_loss_shuffled')
+    ratio, inverse = column(rows, 'jepa_real_to_shuffled_ratio'), column(rows, 'jepa_inverse_loss')
+    fig, axes = plt.subplots(3, 1, figsize=(9.2, 9.2), sharex=True, constrained_layout=True)
+    axes[0].plot(steps, speed, 'o-', color='#0f766e', label='held-out speed')
+    axes[0].fill_between(steps, speed - speed_std, speed + speed_std, color='#0f766e', alpha=.15)
+    axes[0].set(title='V3 K=8 + inverse-dynamics SAC+JEPA', ylabel='held-out mean speed')
+    axes[0].legend(frameon=False); axes[0].grid(alpha=.24)
+    axes[1].plot(steps, real, 'o-', color='#7c3aed', label='real action sequence')
+    axes[1].plot(steps, shuffled, 'o-', color='#ea580c', label='block-shuffled sequence')
+    axes[1].set(ylabel='cosine distance', title='K-step predictive loss')
+    axes[1].legend(frameon=False); axes[1].grid(alpha=.24)
+    axes[2].plot(steps, ratio, 'o-', color='#2563eb', label='real / shuffled')
+    axes[2].plot(steps, inverse, 'o-', color='#dc2626', label='inverse-action MSE')
+    axes[2].axhline(1, color='#64748b', linestyle='--', linewidth=.9, label='no action separation')
+    axes[2].axhspan(.3, .7, color='#2563eb', alpha=.08, label='target ratio band')
+    axes[2].set(xlabel='training transitions', ylabel='diagnostic value', title='Action-conditioning diagnostics')
+    axes[2].legend(ncol=2, frameon=False); axes[2].grid(alpha=.24)
+    output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=180)
+    print(output)
+
+
+if __name__ == '__main__':
+    main()
 
 
 ================================================================================
@@ -1660,6 +2716,67 @@ if __name__ == '__main__':
 
 
 ================================================================================
+FILE: driver/plot_matched_training.py
+================================================================================
+
+"""Overlay held-out learning curves from two isolated training runs."""
+import argparse
+import csv
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def read_metrics(path):
+    rows = list(csv.DictReader(Path(path).open()))
+    if not rows:
+        raise ValueError(f'no rows in {path}')
+    steps = np.asarray([float(row['steps']) for row in rows])
+    mean = np.asarray([float(row['evaluation_mean_speed']) for row in rows])
+    std = np.asarray([float(row['evaluation_std_speed']) for row in rows])
+    valid = np.isfinite(mean)
+    return steps[valid], mean[valid], std[valid]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--control', required=True, help='first-run metrics/training.csv')
+    parser.add_argument('--auxiliary', required=True, help='second-run metrics/training.csv')
+    parser.add_argument('--control-label', required=True, help='legend label for the first run')
+    parser.add_argument('--auxiliary-label', required=True, help='legend label for the second run')
+    parser.add_argument('--output', required=True)
+    args = parser.parse_args()
+    figure, axis = plt.subplots(figsize=(8.7, 4.8), constrained_layout=True)
+    budgets = []
+    for path, label, color in ((args.control, args.control_label, '#0f766e'),
+                               (args.auxiliary, args.auxiliary_label, '#7c3aed')):
+        steps, mean, std = read_metrics(path)
+        budgets.append(steps.max())
+        axis.plot(steps, mean, marker='o', markersize=3, linewidth=1.8,
+                  color=color, label=label)
+        axis.fill_between(steps, mean - std, mean + std, color=color, alpha=0.14)
+    budget = min(budgets)
+    matched = np.allclose(budgets, budgets[0])
+    title = (f'Matched {budget / 1_000:g}k held-out learning curves' if matched
+             else f'Held-out learning curves (common budget {budget / 1_000:g}k)')
+    axis.set(title=title, xlabel='training transitions',
+             ylabel='held-out mean speed')
+    axis.grid(alpha=0.24)
+    axis.legend(frameon=False)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output, dpi=180)
+    print(output)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
 FILE: driver/plot_power_limit.py
 ================================================================================
 
@@ -1713,10 +2830,69 @@ if __name__ == '__main__':
 
 
 ================================================================================
+FILE: driver/plot_spectrum_transfer.py
+================================================================================
+
+"""Overlay SAC and SAC+JEPA transfer curves after a pink-noise alpha shift."""
+import argparse
+import csv
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def read(path):
+    rows = list(csv.DictReader(Path(path).open()))
+    step = np.asarray([float(row['steps']) for row in rows])
+    mean = np.asarray([float(row['evaluation_mean_speed']) for row in rows])
+    std = np.asarray([float(row['evaluation_std_speed']) for row in rows])
+    valid = np.isfinite(mean)
+    return step[valid], mean[valid], std[valid]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--sac-alpha-low', required=True)
+    parser.add_argument('--jepa-alpha-low', required=True)
+    parser.add_argument('--sac-alpha-high', required=True)
+    parser.add_argument('--jepa-alpha-high', required=True)
+    parser.add_argument('--sac-reference', type=float, required=True)
+    parser.add_argument('--jepa-reference', type=float, required=True)
+    parser.add_argument('--output', required=True)
+    args = parser.parse_args()
+    panels = [(r'$\alpha=2$ (more high-frequency terrain)', args.sac_alpha_low, args.jepa_alpha_low),
+              (r'$\alpha=4$ (more low-frequency terrain)', args.sac_alpha_high, args.jepa_alpha_high)]
+    fig, axes = plt.subplots(1, 2, figsize=(12.4, 4.7), sharey=True, constrained_layout=True)
+    for axis, (title, sac, jepa) in zip(axes, panels):
+        for label, path, color in [('SAC transfer', sac, '#0f766e'), ('SAC+JEPA transfer', jepa, '#7c3aed')]:
+            steps, mean, std = read(path)
+            axis.plot(steps, mean, marker='o', markersize=3, linewidth=1.8, color=color, label=label)
+            axis.fill_between(steps, mean - std, mean + std, color=color, alpha=.13)
+        axis.axhline(args.sac_reference, color='#0f766e', linestyle='--', linewidth=.9, alpha=.7,
+                     label='SAC α=3 endpoint')
+        axis.axhline(args.jepa_reference, color='#7c3aed', linestyle='--', linewidth=.9, alpha=.7,
+                     label='SAC+JEPA α=3 endpoint')
+        axis.set(title=title, xlabel='transfer transitions')
+        axis.grid(alpha=.23)
+    axes[0].set_ylabel('held-out mean speed')
+    axes[0].legend(frameon=False, fontsize=8)
+    output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=180)
+    print(output)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
 FILE: driver/plot_training.py
 ================================================================================
 
-"""Plot rollout and held-out evaluation speed from a PPO training CSV."""
+"""Plot rollout and held-out evaluation speed for a PPO or SAC training CSV."""
 import argparse
 import csv
 from pathlib import Path
@@ -1731,6 +2907,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--metrics', default='dumps/metrics/training.csv')
     parser.add_argument('--output', default='dumps/plots/learning_curve.png')
+    parser.add_argument('--algorithm', default='PPO', help='display label, e.g. PPO or SAC+JEPA')
+    parser.add_argument('--jepa-loss-label', default='JEPA distance',
+                        help='y-axis label for the auxiliary diagnostic')
     args = parser.parse_args()
     rows = list(csv.DictReader(Path(args.metrics).open()))
     if not rows:
@@ -1742,18 +2921,155 @@ def main():
     valid = np.isfinite(evaluation)
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
+    has_jepa = 'jepa_loss' in rows[0]
+    fig, axes = plt.subplots(2 if has_jepa else 1, 1, figsize=(8, 6.4 if has_jepa else 4.5),
+                             constrained_layout=True)
+    ax = axes[0] if has_jepa else axes
     ax.plot(steps, rollout, color='#9aa5b1', linewidth=0.9, alpha=0.8, label='rollout mean speed')
     ax.plot(steps[valid], evaluation[valid], 'o-', color='#0f766e', markersize=3,
             linewidth=1.7, label='held-out mean speed')
     ax.fill_between(steps[valid], evaluation[valid] - eval_std[valid],
                     evaluation[valid] + eval_std[valid], color='#0f766e', alpha=0.16,
                     label='held-out standard deviation')
-    ax.set(xlabel='training transitions', ylabel='mean speed', title='PPO learning curve')
+    ax.set(xlabel='training transitions', ylabel='mean speed', title=f'{args.algorithm} learning curve')
     ax.grid(alpha=0.22)
     ax.legend(frameon=False)
+    if has_jepa:
+        jepa = np.asarray([float(row['jepa_loss']) for row in rows])
+        axes[1].plot(steps, jepa, color='#7c3aed', linewidth=1.5, label='JEPA embedding prediction loss')
+        axes[1].set(xlabel='training transitions', ylabel=args.jepa_loss_label,
+                    title='JEPA auxiliary objective')
+        axes[1].grid(alpha=0.22)
+        axes[1].legend(frameon=False)
     fig.savefig(out, dpi=180)
     print(out)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/plot_umap_3d.py
+================================================================================
+
+"""Joint 3-D UMAP and RGB physical-trajectory diagnostics across policies.
+
+Example:
+  python -m driver.plot_umap_3d RUN_A/checkpoints/ppo_*.pt RUN_B/checkpoints/ppo_*.pt
+"""
+import argparse
+import csv
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from src.env.fractal_env import FractalEnv
+from src.rl.policy import tensor_obs
+from src.rl.trainer import load_policy
+from src.terrain.pink_noise import generate
+
+
+def expand_paths(patterns):
+    paths = []
+    for pattern in patterns:
+        candidate = Path(pattern)
+        paths.extend(sorted(candidate.parent.glob(candidate.name)) if any(c in pattern for c in '*?[') else [candidate])
+    paths = sorted(set(paths))
+    if not paths or any(not path.is_file() for path in paths):
+        raise FileNotFoundError('every checkpoint argument must resolve to a checkpoint file')
+    return paths
+
+
+def infer(checkpoint, device, seed, steps):
+    policy, cfg = load_policy(checkpoint, device)
+    policy.eval()
+    terrain = generate(cfg['terrain'], seed=seed)
+    env = FractalEnv(cfg, terrain=terrain, seed=seed)
+    observation, _ = env.reset(seed=seed)
+    rows, latents = [], []
+    for step in range(steps):
+        with torch.no_grad():
+            terrain_t, state_t = tensor_obs([observation], device)
+            latents.append(policy.encode(terrain_t, state_t)[0].cpu().numpy())
+            action, _, _, _ = policy.act(terrain_t, state_t, deterministic=True)
+        rows.append((step, *env.body.position, float(np.linalg.norm(env.body.velocity))))
+        observation, _, terminated, truncated, _ = env.step(action[0].cpu().numpy())
+        if terminated or truncated:
+            break
+    return cfg, np.asarray(rows, dtype=np.float32), np.asarray(latents, dtype=np.float32)
+
+
+def rgb(embedding):
+    lo, hi = embedding.min(axis=0), embedding.max(axis=0)
+    return (embedding - lo) / np.maximum(hi - lo, 1e-6)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('checkpoints', nargs='+', help='checkpoint paths or quoted globs')
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--seed', type=int, default=100001)
+    parser.add_argument('--steps', type=int, default=2000)
+    parser.add_argument('--output-dir', required=True)
+    args = parser.parse_args()
+    if args.steps < 3:
+        parser.error('--steps must be at least 3')
+    paths = expand_paths(args.checkpoints)
+    cases, cfg = [], None
+    for path in paths:
+        cfg, rows, latents = infer(path, args.device, args.seed, args.steps)
+        cases.append((path.stem, rows, latents))
+    try:
+        import umap
+    except ImportError as error:
+        raise RuntimeError('UMAP requires umap-learn.') from error
+    joined = np.concatenate([values[2] for values in cases])
+    normalized = (joined - joined.mean(axis=0)) / np.maximum(joined.std(axis=0), 1e-6)
+    embedding = umap.UMAP(n_components=3, n_neighbors=min(30, len(joined) - 1), min_dist=0.1,
+                          metric='euclidean', random_state=cfg['training']['seed']).fit_transform(normalized)
+    colors = rgb(embedding)
+    root = Path(args.output_dir)
+    plot_dir = root / 'plots'
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    offsets = np.cumsum([0] + [len(values[1]) for values in cases])
+
+    figure = plt.figure(figsize=(5.1 * len(cases), 4.8), constrained_layout=True)
+    for index, (label, rows, _) in enumerate(cases):
+        axis = figure.add_subplot(1, len(cases), index + 1, projection='3d')
+        point_colors = colors[offsets[index]:offsets[index + 1]]
+        points = embedding[offsets[index]:offsets[index + 1]]
+        axis.scatter(points[:, 0], points[:, 1], points[:, 2], c=point_colors, s=6, depthshade=False)
+        axis.plot(points[:, 0], points[:, 1], points[:, 2], color='#334155', linewidth=.45, alpha=.45)
+        axis.set(title=label, xlabel='UMAP 1', ylabel='UMAP 2', zlabel='UMAP 3')
+    figure.suptitle('Joint 3-D UMAP: each policy on the same held-out terrain', fontsize=14)
+    figure.savefig(plot_dir / 'joint_umap_3d_all_cases.png', dpi=180)
+    plt.close(figure)
+
+    figure = plt.figure(figsize=(5.1 * len(cases), 4.8), constrained_layout=True)
+    for index, (label, rows, _) in enumerate(cases):
+        axis = figure.add_subplot(1, len(cases), index + 1, projection='3d')
+        point_colors = colors[offsets[index]:offsets[index + 1]]
+        axis.scatter(rows[:, 1], rows[:, 2], rows[:, 3], c=point_colors, s=7, depthshade=False)
+        axis.plot(rows[:, 1], rows[:, 2], rows[:, 3], color='#334155', linewidth=.45, alpha=.4)
+        axis.set(title=label, xlabel='world x', ylabel='world y', zlabel='speed')
+    figure.suptitle('Physical trajectories in 3-D, colored by joint UMAP RGB', fontsize=14)
+    figure.savefig(plot_dir / 'trajectory_umap_rgb_3d_all_cases.png', dpi=180)
+    plt.close(figure)
+
+    with (plot_dir / 'joint_umap_3d_all_cases.csv').open('w', newline='') as handle:
+        writer = csv.writer(handle)
+        writer.writerow(['case', 'step', 'x', 'y', 'speed', 'umap_1', 'umap_2', 'umap_3', 'red', 'green', 'blue'])
+        for index, (label, rows, _) in enumerate(cases):
+            for row, point, color in zip(rows, embedding[offsets[index]:offsets[index + 1]],
+                                         colors[offsets[index]:offsets[index + 1]]):
+                writer.writerow([label, *row, *point, *color])
+    print(plot_dir / 'joint_umap_3d_all_cases.png')
+    print(plot_dir / 'trajectory_umap_rgb_3d_all_cases.png')
 
 
 if __name__ == '__main__':
@@ -1782,6 +3098,25 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+================================================================================
+FILE: driver/train_sac.py
+================================================================================
+
+"""Train SAC with the same FractalEnv and output conventions as PPO."""
+import argparse
+from src.rl.sac_trainer import train_sac
+from src.utils.config import load_config
+
+
+def main():
+    parser = argparse.ArgumentParser(); parser.add_argument('--config'); parser.add_argument('--overlay', action='append', default=[]); parser.add_argument('--set', dest='overrides', action='append', default=[]); parser.add_argument('--device', default='cpu')
+    args = parser.parse_args()
+    train_sac(load_config(args.config, overlays=['config/sac.yaml', *args.overlay], overrides=args.overrides), args.device)
+
+
+if __name__ == '__main__': main()
 
 
 ================================================================================
@@ -1864,3 +3199,4 @@ if __name__ == "__main__":
     generate_summary()
 
 
+`

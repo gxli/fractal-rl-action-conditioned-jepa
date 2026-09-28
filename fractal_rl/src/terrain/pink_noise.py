@@ -1,5 +1,6 @@
 """Periodic mean-centered Gaussian field, squared potential, and derivatives."""
 from dataclasses import dataclass
+from typing import Optional
 import numpy as np
 
 
@@ -11,6 +12,9 @@ class Terrain:
     gradient_y: np.ndarray
     gradient_reference: float
     pixel_size: float = 1.0
+    # Full periodic CDD cube, S x H x W.  It is created once when a terrain is
+    # generated and local observations only bilinearly sample this cache.
+    cdd: Optional[np.ndarray] = None
 
     @property
     def size(self):
@@ -59,5 +63,28 @@ def generate(cfg, seed=None):
         raise ValueError('potential gradient has zero scale')
     gx /= gradient_reference
     gy /= gradient_reference
+    cdd = None
+    cdd_scales = cfg.get('cdd_scales')
+    if cdd_scales:
+        scales = tuple(float(scale) for scale in cdd_scales)
+        if not scales or min(scales) <= 0:
+            raise ValueError('terrain.cdd_scales must contain positive values')
+        try:
+            from constrained_diffusion import constrained_diffusion_decomposition
+        except ImportError as exc:
+            raise ImportError('terrain CDD requires the constrained-diffusion package') from exc
+        # The CDD decomposition is intentionally run over the complete periodic
+        # field before environments are created.  ``inverted`` is the CDD
+        # inverse-decomposition mode requested for this behavioral ablation.
+        bands, _residual, used_scales = constrained_diffusion_decomposition(
+            potential.astype(np.float32), num_channels=len(scales),
+            min_scale=min(scales), max_scale=max(scales), mode='log',
+            constrained=True, inverted=bool(cfg.get('cdd_inverted', True)),
+            return_scales=True, use_gpu=bool(cfg.get('cdd_use_gpu', False)), verbose=False)
+        if len(bands) < len(scales):
+            raise RuntimeError(f'CDD returned {len(bands)} bands for {len(scales)} requested scales')
+        cdd = np.stack(bands[:len(scales)], axis=0).astype(np.float32, copy=False)
+        if cdd.shape != (len(scales), n, n) or not np.isfinite(cdd).all():
+            raise ValueError(f'invalid full-field CDD cache shape={cdd.shape}, scales={used_scales}')
     return Terrain(intensity.astype(np.float32), potential.astype(np.float32),
-                   gx.astype(np.float32), gy.astype(np.float32), gradient_reference, dx)
+                   gx.astype(np.float32), gy.astype(np.float32), gradient_reference, dx, cdd)

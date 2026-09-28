@@ -1,0 +1,158 @@
+\documentclass[10pt]{article}
+\usepackage[margin=.72in]{geometry}
+\usepackage{amsmath,amsfonts,booktabs,graphicx}
+\title{K=128 Repeat-4 SAC/JEPA: Bookkeeping Report}
+\date{September 27, 2026}
+\begin{document}\maketitle
+\section{Design and task}
+The benchmark is designed to make representation learning testable without
+turning RL into an underpowered sparse-reward search problem. First, the
+fractal potential produces connected basins, slopes and acceleration fields:
+the agent must infer how its throttle and steering interact with local terrain
+and damping, rather than classify a static image. Second, reward is dense
+distance travelled (with a small control cost), so every transition supplies a
+learning signal to actor and critic. This combination makes the task physically
+non-trivial while remaining trainable in short controlled sweeps on one RTX
+3090; improvements can therefore be attributed to representation and transfer
+rather than simply to surviving an extremely sparse objective.
+\subsection{Terrain game and observation}
+Each task is a $512\times512$ periodic pink-noise landscape. A standardized
+Gaussian intensity field $I$ is squared to form the potential $\phi=I^2$;
+the spectral exponent $\alpha$ changes the spatial correlation and basin
+geometry while preserving the intended pointwise scale. The source is
+$\alpha=3$ and frozen transfer changes only $\alpha$ to 2 or 3.5. The point
+mass begins at the sampled global potential minimum, observes a world-frame
+$32\times32$ potential patch plus velocity, speed, mass and previous action,
+and is rewarded for distance travelled minus a small control cost.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.9\linewidth]{dumps/sac_noim_analysis/terrain_value_histograms_white.png}
+\caption{Reference terrain statistics. The potential marginal is comparable
+across exponents; $\alpha$ changes the spatial texture and connectivity that
+the agent must navigate.}\end{figure}
+
+The dynamics use 20 ms integration, maximum forward/lateral accelerations
+of 2/1, terrain-force scale 4, and linear damping .6. The repeat-4 policy
+holds an action for four integrations ($.08$ s); each 40 s episode therefore
+contains 500 decisions. Critic-trained sharing means TD loss updates a common
+visual encoder while the actor consumes a stop-gradient latent.
+\section{Objective and controlled comparison}
+Let $\epsilon$ be white Gaussian noise. The periodic fractal intensity is
+formed in Fourier space by $I=\mathcal F^{-1}[\mathcal F(\epsilon)w(f)]$,
+where $w(f)=(\|f\|^2+f_c^2)^{-\alpha/4}$ and the DC component is removed.
+After centering and unit-variance normalization, the conservative terrain
+potential is $\phi(x,y)=I(x,y)^2$. The field acceleration is
+$a_\phi=-4\nabla\phi/g_{.95}$, where $g_{.95}$ is the 95th-percentile
+gradient magnitude for that terrain. With action $a=(a_\parallel,a_\perp)$,
+\[\dot v=2a_\parallel\hat v+a_\perp\hat v_\perp+a_\phi-.6v.\]
+SAC uses TD regression and entropy-regularized policy improvement,
+\[L_Q=\|Q-r-\gamma(\min_i\bar Q_i-\eta\log\pi)\|^2,\qquad
+L_\pi=\mathbb E[\eta\log\pi(a|o)-\min_iQ_i(o,a)].\]
+JEPA predicts an EMA future latent from the applied action sequence,
+\[L_{\rm JEPA}=1-\cos(q([z_t,a_t,\ldots,a_{t+K-1}]),\operatorname{sg}[\bar z_{t+K}]).\]
+For shared-critic arms, $z=e(o)$ is updated by $L_Q$; the policy reads
+$\operatorname{sg}[z]$. Thus critic TD gradients shape the visual encoder,
+while actor gradients cannot destabilize it. The JEPA arm adds $.025L_{\rm JEPA}$;
+inverse, margin, variance and distributional regularizer terms are zero.
+\subsection{Prediction scale}
+Does a JEPA prediction interval close to the $32$ px encoder FOV improve
+transfer beyond critic-trained sharing alone? The repeat-4 decision interval is
+$.08$ s, so $K=128$ is 10.24 s and about 30.7 px at 3 px/s. This is deliberately
+longer than K=32 (7.7 px) and K=64 (15.4 px), while remaining comparable to one
+visible field of view.
+\subsection{Controlled arms}
+All runs use 20k decisions = 80k physics steps and source $\alpha=3$, followed
+by frozen-encoder transfer to $\alpha=2$ and $\alpha=3.5$.
+\begin{center}\begin{tabular}{ll}\toprule Arm & encoder update \\ \midrule
+SAC & separate actor and critic encoders \\
+SAC shared & critic TD loss trains shared encoder; actor reads stop-gradient \\
+SAC+JEPA K=128 shared & same sharing plus action-conditioned JEPA \\
+SAC+JEPA K=128 + SIGReg shared & source-only regularized JEPA ablation \\ \bottomrule\end{tabular}\end{center}
+\section{Completed results}
+All three primary source runs and all six baseline frozen-transfer runs
+completed. The SIGReg source ablation is also complete, and its matched
+frozen-transfer runs are in progress. The curves
+separate the architecture effect from the long prediction task: shared vanilla
+SAC is the control for critic-first sharing; the JEPA arm differs only by the
+K=128 action-conditioned prediction objective.
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{dumps/ar4k128_analysis/k128_curves_white.png}
+\caption{K=128 learning curves for the four completed source architectures.
+Each panel uses 20k decisions = 80k
+physics steps and shaded bands are the standard deviation over four held-out
+terrain seeds. The SIGReg transfer panels will be added after their currently
+running frozen-transfer ablations finalize.}\end{figure}
+\paragraph{Early transfer.} On the harder frozen $\alpha=2$ shift, JEPA is
+best initially: at 2k/4k/6k decisions it reaches 1.091/1.635/2.160, versus
+shared vanilla SAC at .707/1.339/2.042 and separate SAC at .506/.624/1.179.
+By 20k it does not retain an endpoint advantage (JEPA 3.068; shared vanilla
+3.090; separate 3.079). Thus K=128 supports faster immediate transfer, not a
+higher final asymptote. On $\alpha=3.5$, early curves are close and no robust
+JEPA advantage is visible.
+\section{Conclusion}
+The four completed source arms converge to similar final speeds: long-horizon
+JEPA, including the SIGReg ablation, does not raise the asymptote in this
+reactive distance-maximization task. The transfer
+curves reveal the useful distinction. Critic-trained sharing supplies the
+large early-transfer improvement over separate SAC because TD loss learns a
+value-relevant visual encoder quickly. On the harder $\alpha=2$ shift, K=128
+JEPA further improves the first 2k--6k decisions by predicting action
+consequences across roughly one FOV. Thus sharing is the primary sample-
+efficiency mechanism; long-horizon JEPA is an additional immediate-transfer
+signal when the terrain shift has more complex local structure.
+\clearpage
+\section{Dense landscape UMAPs}
+The representation probe is not fitted only to rollout samples. At each of
+2k, 6k, 10k, 14k and 20k decisions, it evaluates every point of a fixed
+$128\times128$ world-location grid on one held-out $\alpha=3$ terrain. Every
+grid point supplies a complete $32\times32$ visual FOV and the same fixed
+proprioceptive state. cuML fits a three-dimensional UMAP to the dense states;
+the corresponding deterministic rollout is then overlaid on the potential,
+latent-RGB landscape, and UMAP cloud. Thus the background represents the
+landscape available to the agent, while the line identifies the states it
+actually visited.
+
+These are critic-trained shared-encoder architectures. Consequently Actor,
+$Q_1$, and $Q_2$ have the same encoder output by construction; the report
+therefore shows the one non-duplicated shared representation per method.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{dumps/ar4k128_analysis/sac_shared_dense_umap_stages.png}
+\caption{Shared vanilla SAC: dense held-out landscape UMAP panels at 2k, 6k,
+10k, 14k and 20k decisions. Each panel shows potential and trajectory (left),
+latent-RGB terrain map (middle), and the cuML 3-D UMAP with trajectory overlay
+(right).}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=\linewidth]{dumps/ar4k128_analysis/jepa_shared_dense_umap_stages.png}
+\caption{Critic-trained shared SAC+JEPA K=128, using the identical dense
+held-out probe schedule. The action-conditioned prediction loss changes the
+encoder trajectory while retaining the same observation and physics setup.}
+\end{figure}
+
+\clearpage
+\section{September 28, 2026 update: complete encoder comparison}
+The dense probe now includes every K=128 source architecture. Vanilla SAC has
+independent actor and $Q_1$ encoders, so both are reported. The shared vanilla
+SAC, shared SAC+JEPA, and shared SAC+JEPA+SIGReg rows each report their one
+non-duplicated critic-trained representation. Every row uses the same held-out
+$\alpha=3$ terrain, fixed proprioceptive state, five checkpoint schedule, and
+final 20k-decision endpoint.
+
+\begin{figure}[!ht]\centering
+\includegraphics[width=\linewidth]{dumps/ar4k128_analysis/k128_dense_rgb_all_encoders.png}
+\caption{Dense latent-RGB evolution. Separate vanilla SAC requires two rows
+because its actor and critic encoders are independent. The other three rows
+are shared critic-trained encoders. Each row uses a within-row PCA-to-RGB
+basis across 2k, 6k, 10k, 14k, and 20k decisions.}
+\end{figure}
+
+\begin{figure}[!ht]\centering
+\includegraphics[height=.80\textheight]{dumps/ar4k128_analysis/k128_dense_umap_all_encoders_20k.png}
+\caption{Final 20k-decision dense landscape UMAP comparison. Each row shows
+the held-out potential and deterministic path, dense latent-RGB map, and
+three-dimensional UMAP with the visited trajectory overlaid.}
+\end{figure}
+
+\end{document}

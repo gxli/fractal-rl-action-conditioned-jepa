@@ -1,0 +1,158 @@
+\documentclass[10pt]{article}
+\usepackage[margin=.72in]{geometry}
+\usepackage{amsmath,booktabs,graphicx,microtype}
+\title{Repeat-4 SAC/JEPA: Longer Prediction Windows on Fractal Terrain}
+\author{}
+\date{September 26, 2026}
+\begin{document}
+\maketitle
+
+\paragraph{Scope.} This is a separate follow-up to \texttt{sac\_jepa\_short\_report.tex}; the earlier report remains unchanged. It tests whether JEPA was too local at the original 20 ms decision rate by holding each policy action for four stable physics integrations. Every result is one run with four held-out terrain seeds; bands and error bars are across those four deterministic evaluations, not multi-run confidence intervals.
+
+\section{Environment and learning setup}
+Each task is a $512\times512$ periodic pink-noise intensity field $I$ with
+spectral exponent $\alpha$ and potential $\phi=|I|^2$. Intensity is percentile
+normalized and the potential gradient is scaled by its 95th-percentile norm;
+changing $\alpha$ therefore changes spatial correlation and basin geometry,
+not the intended pointwise potential scale. The agent observes a world-frame
+$32\times32$ local potential patch and a six-dimensional state (velocity,
+speed, mass, previous action). It begins at the terrain global minimum, so it
+cannot obtain initial speed merely by rolling downhill. Reward is distance
+travelled minus a small control cost; held-out mean speed on four terrain seeds
+is the reported behavioural metric.
+
+\section{Sampling rate and prediction geometry}
+The physics integrator remains $\Delta t=.02$ s, with two internal substeps. The policy and replay buffer now observe one transition per four integrations: the decision interval is $.08$ s and an episode contains 500 decisions but still 2,000 physics steps (40 s). We set the SAC discount to $\gamma=.99^4=.96059601$, preserving the original physical discount rate.
+
+The encoder still sees a $32\times32$ terrain field of view at one world unit per pixel. JEPA receives the current latent and next $K$ decisions, then predicts an EMA target latent. At repeat-4, $K=32$ spans 2.56 s and $K=64$ spans 5.12 s. At the reference 3 px/s speed those are about 7.7 px and 15.4 px of travel: materially larger than the previous $K=8$ window of only $.16$ s / about $.5$ px, while still below the 32 px FOV width. All curves use 20k decisions = 80k physics steps.
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+JEPA horizon & decision time & reference travel & fraction of 32 px FOV\\
+\midrule
+$K=32$ & 2.56 s & 7.7 px & 24\%\\
+$K=64$ & 5.12 s & 15.4 px & 48\%\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Controlled comparison}
+The source terrain has spectral exponent $\alpha=3$. We compare SAC, shared critic-trained SAC+JEPA at $K=32$, the same at $K=64$, and $K=32$ with spherical-MMD regularization. The predictive loss is
+\[
+L_{\rm JEPA}=1-\cos\!\left(q([z_t,a_t,\ldots,a_{t+K-1}]),\operatorname{sg}[\bar z_{t+K}]\right).
+\]
+For all JEPA arms, action-margin, inverse-dynamics, and variance terms are exactly zero. Critics read the shared encoder and train it through TD loss; the actor reads a detached latent. Transfer freezes both actor and critic encoders and trains only policy/value heads on $\alpha=2$ or $\alpha=3.5$.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_speed_curves.png}
+\caption{New repeat-4 learning curves. The source panel includes the newly
+completed separate-encoder JEPA K=32 curve (orange); it is source-only until
+matched frozen transfers are run. The horizontal axis is physical simulation
+steps, so all matched panels cover the same 80k-step physical budget.}
+\end{figure}
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_final_speeds.png}
+\caption{Final held-out speeds. Error bars are standard deviations across the four held-out terrain seeds.}
+\end{figure}
+
+\section{Does the longer JEPA task use actions?}
+The shuffled-action ratio compares real-action and batch-shuffled-action prediction loss. Values below one mean that the true action sequence is more predictive than shuffled controls. The diagnostics show a substantial decline from the initial near-action-blind state, as expected from the larger physical forecast. They do not, by themselves, establish a behavioural advantage over SAC.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_jepa_diagnostics.png}
+\caption{Source JEPA diagnostics at the repeat-4 sampling rate.}
+\end{figure}
+
+\section{Terrain walks, encoder agreement, and manifold structure}
+Each row below uses the same held-out terrain seed and global-minimum start.
+The first panel in every row is the actual terrain walk; the remaining panels
+are PCA/UMAP projections of actor, $Q_1$, and $Q_2$ latents along that walk.
+Thus the visualizations describe what the policy and value heads see on their
+own trajectories, not a generic image embedding.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.99\linewidth]{dumps/ar4_analysis/actionrepeat4_trajectory_umap_montage.png}
+\caption{Matched held-out terrain walks and per-encoder PCA/UMAP panels for
+the four source arms. Rows, from upper-left clockwise, are SAC, JEPA K=32,
+JEPA K=64, and JEPA+spherical-MMD K=32; the method label is printed above each
+panel.}
+\end{figure}
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.72\linewidth]{dumps/ar4_jepa_sigreg_k32_source_a3/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\caption{JEPA+SIGReg K=32 source trajectory and actor/$Q_1$/$Q_2$ PCA/UMAP
+views, included as the matched regularized source representation.}
+\end{figure}
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.72\linewidth]{dumps/ar4_analysis/actionrepeat4_k64_transfer_trajectory_umap.png}
+\caption{Same K=64 JEPA architecture across source training and frozen-encoder
+transfers. Each labelled panel contains its held-out terrain walk plus actor,
+$Q_1$, and $Q_2$ PCA/UMAP views.}
+\end{figure}
+
+For cross-model comparison, CKA and manifold statistics use one fixed,
+500-observation held-out probe, rather than the policy-dependent walks above.
+Participation-ratio dimension is the effective number of covariance-spectrum
+directions; the kNN estimate is a local intrinsic-dimension diagnostic. The
+alignment comparison below uses independent actor/Q encoders in both arms;
+the shared-backbone CKA is deliberately excluded because it is trivial.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.72\linewidth]{dumps/ar4_analysis/actionrepeat4_fair_encoder_alignment.png}
+\caption{Fair centered linear CKA: vanilla SAC versus separate-encoder JEPA
+K=32, with actor, $Q_1$, and $Q_2$ all independently parameterized.}
+\end{figure}
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.9\linewidth]{dumps/ar4_analysis/actionrepeat4_manifold_diagnostics.png}
+\caption{Effective and local intrinsic dimensions measured on the same common
+probe.}
+\end{figure}
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_losses.png}
+\caption{All logged source optimization objectives. The auxiliary JEPA term is
+shown separately in the diagnostic panel; inverse, margin, variance, and
+critic-JEPA terms are zero by construction in this sweep.}
+\end{figure}
+
+\subsection{Temporal encoder evolution}
+Temporal CKA compares each checkpoint with every other checkpoint on the same
+400 held-out observations. A broad high-CKA band means that a representation
+stabilizes early; lower off-diagonal CKA means that it continues to change as
+the policy learns. This is the valid stabilization test: SAC and JEPA both use
+independent actor, $Q_1$, and $Q_2$ encoders. The three columns avoid the
+ambiguity of a single mixed encoder matrix.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_temporal_cka.png}
+\caption{Checkpoint-to-checkpoint CKA on an identical held-out observation
+probe. Top: vanilla SAC. Middle: matched separate-encoder JEPA K=32, the fair
+JEPA stabilization comparison. Bottom: critic-trained shared JEPA K=32, shown
+separately as the encoder-sharing mechanism. Broad off-diagonal bands indicate
+encoder stabilization.}
+\end{figure}
+
+\section{Verdict}
+\subsection{Encoder-sharing ablation}
+The completed K=32 arm is \emph{critic-trained shared}: TD loss updates the
+single encoder, while actor-policy gradients are stopped at its latent. The
+new counterpart shares the same encoder but blocks TD gradients, leaving it
+actor/JEPA-owned. The latter reaches 2.965 at source, 3.082 at $\alpha=2$,
+and 3.118 at $\alpha=3.5$. Thus critic-trained sharing is better at source
+(3.107 versus 2.965), whereas the stopped-TD counterpart is competitive or
+higher on frozen transfer. This is a one-run result, not a final architecture
+choice; the figure makes the tradeoff explicit.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_encoder_sharing_ablation.png}
+\caption{Repeat-4 K=32 encoder-sharing ablation: critic TD gradients update
+the shared encoder versus actor/JEPA-only encoder updates.}
+\end{figure}
+
+At source $\alpha=3$, $K=32$ JEPA is the best final arm ($3.107$) versus SAC ($3.054$), while $K=64$ is $3.076$ and spherical-MMD $K=32$ is $3.052$. Under frozen transfer to $\alpha=2$, the more spatially complex shift, $K=64$ is best ($3.090$) versus SAC ($3.075$); at $\alpha=3.5$, $K=64$ is again best ($3.095$) versus SAC ($3.068$). The $\alpha=2$ ordering is consistent with a longer action-conditioned representation aiding generalization when local terrain structure is harder, but its margin is smaller than the four-seed standard deviations, so it is suggestive rather than conclusive. The CKA matrix is the direct check of the related encoder-discrepancy hypothesis. Unlike the 0.16 s experiment, the longer horizon forces real actions to beat shuffled controls. This supports the narrower conclusion that the original JEPA window was too short to force useful action-conditioned prediction; it does not establish a robust multi-seed advantage for JEPA.
+
+\end{document}

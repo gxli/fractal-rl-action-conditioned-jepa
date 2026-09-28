@@ -1,0 +1,71 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.78in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{caption}
+\title{Frozen-Encoder Spectral Transfer: SAC versus Actor+Critic JEPA}
+\author{}
+\date{September 23, 2026 --- RTX 3090}
+\begin{document}
+\maketitle
+
+\section*{Question}
+Does the JEPA-pretrained representation improve adaptation when its visual
+encoder is held fixed after a terrain spectrum shift?  This focused comparison
+keeps only the two relevant strategies: vanilla SAC and SAC with independent
+actor and critic JEPA objectives.  The CDD/ConvNeXt experiment is intentionally
+excluded: its preprocessing/runtime characteristics are a separate question.
+
+\section*{Protocol}
+Both source agents were trained for 50k transitions at spectral exponent
+$\alpha=3$.  Each was initialized from its own endpoint and adapted for a
+fresh 20k transitions at $\alpha=2$ and $\alpha=4$.  During each transfer, the
+actor CNN/encoder and both independent critic CNN/encoders were frozen.  The
+policy head, Q heads, entropy temperature, and (for JEPA) predictor heads
+remained trainable.  Optimizer, replay buffer, and environments were fresh.
+Numbers are deterministic held-out mean speed $\pm$ standard deviation across
+four held-out terrain seeds; this is one training seed per condition.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=.96\linewidth]{output/pdf/frozen_encoder_adaptation_curve.png}
+\caption{The matched frozen-encoder adaptation curves.  JEPA is clearly ahead
+at 10k on both shifts; the 20k endpoints converge.}
+\end{figure}
+
+\begin{center}\small
+\begin{tabular}{llrr}
+\toprule
+Target $\alpha$ & Method & 10k transfer & 20k transfer \\
+\midrule
+2 & Vanilla SAC & $0.315\pm0.125$ & \textbf{$2.917\pm0.022$} \\
+2 & Actor+critic JEPA & \textbf{$1.097\pm0.065$} & $2.842\pm0.039$ \\
+\addlinespace
+4 & Vanilla SAC & $2.309\pm0.097$ & $3.050\pm0.075$ \\
+4 & Actor+critic JEPA & \textbf{$2.510\pm0.028$} & \textbf{$3.090\pm0.052$} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{Result}
+JEPA improves early adaptation under fixed encoders: at 10k it is higher by
+$0.782$ speed at $\alpha=2$ and $0.201$ at $\alpha=4$.  By 20k, the advantage
+is not consistent: vanilla SAC is higher by $0.075$ at $\alpha=2$, while
+actor+critic JEPA is higher by $0.040$ at $\alpha=4$.  Thus the defensible
+claim is an early adaptation benefit, not a proven final-performance gain.
+
+\section*{Verification artifacts}
+Each finalized transfer directory contains a full analysis manifest, learning
+curve, held-out trajectory/UMAP, episode diagnostics, pairwise UMAP, and CKA.
+The four run directories are listed below:
+\begin{center}\small\ttfamily
+dumps/sac\_frozen\_alpha2\_transfer/\\
+dumps/sac\_frozen\_alpha4\_transfer/\\
+dumps/sac\_jepa\_actorcritic\_frozen\_alpha2\_transfer/\\
+dumps/sac\_jepa\_actorcritic\_frozen\_alpha4\_transfer/
+\end{center}
+The CKA matrices are identically 1.00 across the two transfer checkpoints, as
+expected when the encoders are frozen.
+
+\end{document}

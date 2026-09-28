@@ -1,0 +1,3 @@
+# More high-frequency detail than the alpha=3 reference landscape.
+terrain:
+  spectral_exponent: 2.0

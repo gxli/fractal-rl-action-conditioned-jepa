@@ -1,0 +1,11 @@
+# Shared actor/JEPA encoder; critics consume detached features, so TD loss
+# cannot update the backbone. Counterpart to critic_trained sharing.
+training:
+  encoder_sharing: actor_stop_gradient
+  jepa_coef: 0.025
+  critic_jepa_coef: 0.0
+  jepa_horizon: 32
+  jepa_inverse_coef: 0.0
+  jepa_action_margin_coef: 0.0
+  jepa_variance_coef: 0.0
+  jepa_regularizer_coef: 0.0

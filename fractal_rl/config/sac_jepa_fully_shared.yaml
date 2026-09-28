@@ -1,0 +1,12 @@
+# One actor-owned encoder; actor JEPA/policy and critic TD gradients all update it.
+training:
+  encoder_sharing: fully_shared
+  jepa_coef: 0.025
+  critic_jepa_coef: 0.0
+  jepa_horizon: 8
+  jepa_target_tau: 0.01
+  jepa_target_update_transitions: 64
+  jepa_inverse_coef: 0.0
+  jepa_action_margin_coef: 0.0
+  jepa_variance_coef: 0.0
+  jepa_regularizer_coef: 0.0

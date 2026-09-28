@@ -185,7 +185,10 @@ def load_policy(path, device='cpu', trusted_legacy=False):
     if checkpoint.get('algorithm', 'ppo') == 'sac':
         from src.rl.sac import SACActor
         policy = SACActor(cfg['agent']['fov_size'],
-                          jepa_enabled=float(cfg['training'].get('jepa_coef', 0.0)) > 0).to(device)
+                          jepa_enabled=float(cfg['training'].get('jepa_coef', 0.0)) > 0,
+                          jepa_horizon=int(cfg['training'].get('jepa_horizon', 1)),
+                          jepa_inverse_enabled=float(cfg['training'].get('jepa_inverse_coef', 0.0)) > 0,
+                          cdd_scales=cfg['terrain'].get('cdd_scales')).to(device)
     else:
         # Checkpoints saved before the architecture option are the original shared model.
         policy = ActorCritic(cfg['agent']['fov_size'], architecture=cfg['agent'].get('architecture', 'shared'),
