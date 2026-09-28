@@ -1,0 +1,104 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.72in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{microtype}
+\title{SAC versus action-conditioned JEPA on the fractal terrain task}
+\author{}
+\date{RTX 3090 runs, September 20, 2026}
+\begin{document}
+\maketitle
+
+\section*{Question and result}
+All runs use the same centered-Gaussian squared-potential terrain, random
+starts, $P_{\max}=6$ longitudinal power cap, 16 environments, held-out terrain
+seeds, and 10,000-transition budget. SAC alone is the strongest observed
+controller. The normalized, action-conditioned JEPA branch is mechanically
+valid---it beats shuffled-action and identity diagnostics---but still reduces
+held-out speed at this budget.
+
+\begin{center}
+\small
+\begin{tabular}{p{1.6in}ccp{2.0in}}
+\toprule
+Run & Held-out speed at 10k & Difference from SAC & Status \\
+\midrule
+SAC-only & $1.655\pm0.056$ & --- & baseline \\
+SAC+JEPA, old MSE target & $1.278\pm0.042$ & $-22.8\%$ & superseded cadence/scale safeguards \\
+SAC+JEPA, corrected MSE & $1.403\pm0.020$ & $-15.2\%$ & variance floor and slow EMA \\
+SAC+JEPA, cosine predictive loss & $1.188$ & $-28.2\%$ & scale-normalized diagnostic run \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{Full corrected SAC+JEPA loss}
+For a replayed transition $(o_t,a_t,o_{t+1})$, the actor has online encoder
+$z_t=f_\theta(o_t)$, EMA target $\bar z_{t+1}=\bar f(o_{t+1})$, and predictor
+$q_\psi$. The optimized actor objective is
+\begin{equation}
+\begin{aligned}
+\mathcal L_{\rm actor}={}&\mathbb E\!\left[\alpha\log\pi(a|o)-\min(Q_1(o,a),Q_2(o,a))\right]\\
+&+\lambda\left(1-\cos\!\left(q_\psi([z_t,a_t]),\operatorname{sg}[\bar z_{t+1}]\right)\right)\\
+&+c_{\rm var}\frac{1}{d}\sum_{j=1}^d\max\!\left(0,s_{\rm min}-\operatorname{std}_B(z_{:,j})\right).
+\end{aligned}
+\end{equation}
+The cosine loss is scale-free; the variance floor prevents a zero-variance
+representation. The final run uses $\lambda=0.025$, $c_{\rm var}=0.01$,
+$s_{\rm min}=0.1$, and updates the EMA target by 0.01 every 64 collected
+transitions. Logged diagnostics include the weighted JEPA and variance terms,
+action-shuffled loss, identity baseline, and embedding spread.
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{output/pdf/sac_only_learning_curve.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/learning_curve.png}
+\caption{Performance curves. Left: SAC-only. Right: normalized cosine SAC+JEPA.
+The right lower panel is the scale-free predictive loss.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/latent_umap_sac_000010000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/latent_umap_sac_000010000_seed100001.png}
+\caption{Endpoint terrain-overlay trajectories and UMAPs on the same held-out
+seed. Left: SAC-only. Right: normalized cosine SAC+JEPA.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/dynamics_history_sac_000010000_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/dynamics_history_sac_000010000_seed100001.png}
+\caption{Full velocity, control, and acceleration diagnostics. Left: SAC-only.
+Right: normalized cosine SAC+JEPA.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/encoder_cka_matrix_seed100001.png}
+\caption{Encoder evolution across the five saved checkpoints, measured by
+linear CKA on a common held-out inference trajectory.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\caption{Checkpoint-pair latent matrix on the shared deterministic held-out
+trajectory. Each cell jointly embeds the row and counterpart encoder states
+(blue/orange); diagonal cells are self-comparisons. Left: SAC-only. Right:
+normalized cosine SAC+JEPA.}
+\end{figure}
+
+\section*{Interpretation}
+The cosine replacement fixes the earlier loss-scale failure: the predictive
+term is no longer numerically negligible relative to the variance term, and
+the shuffled-action loss exceeds the real-action loss ($0.0099$ versus $0.0038$
+at 10k). Thus the predictor uses actions. Nonetheless, performance is lower
+than SAC alone. At this horizon and budget, the evidence favors SAC-only;
+multi-step targets and matched multi-seed sweeps remain the next JEPA test.
+
+\end{document}

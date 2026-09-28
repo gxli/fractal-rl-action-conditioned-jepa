@@ -1,0 +1,1866 @@
+Python Source Summary
+=====================
+
+Project root: /Users/gxli/proj/fractral_rl/fractal_rl
+Included src files: 21
+Detected main/entry files: 13
+Total unique files included: 34
+
+================================================================================
+FILE: src/__init__.py
+================================================================================
+
+
+
+================================================================================
+FILE: src/analysis/__init__.py
+================================================================================
+
+"""Reusable analysis pipelines for trained policies."""
+
+from .inference import standard_inference_paths
+
+__all__ = ['standard_inference_paths']
+
+
+================================================================================
+FILE: src/analysis/inference.py
+================================================================================
+
+"""Canonical artifact locations for deterministic policy inference."""
+from pathlib import Path
+
+
+def standard_inference_paths(output_dir, checkpoint, seed):
+    """Return all artifacts emitted by the standard deterministic analysis.
+
+    The standard set comprises raw latent/inference dumps, a map-and-UMAP view,
+    acceleration history, and a self-contained episode diagnostic panel.
+    """
+    root = Path(output_dir)
+    stem = f'{Path(checkpoint).stem}_seed{seed}'
+    return {
+        'latent_npz': root / 'latents' / f'latent_trajectory_{stem}.npz',
+        'latent_csv': root / 'latents' / f'latent_trajectory_{stem}.csv',
+        'umap_csv': root / 'plots' / f'latent_umap_{stem}.csv',
+        'umap_plot': root / 'plots' / f'latent_umap_{stem}.png',
+        'acceleration_plot': root / 'plots' / f'acceleration_history_{stem}.png',
+        'episode_plot': root / 'plots' / f'episode_diagnostics_{stem}.png',
+    }
+
+
+================================================================================
+FILE: src/env/__init__.py
+================================================================================
+
+
+
+================================================================================
+FILE: src/env/fractal_env.py
+================================================================================
+
+"""Minimal Gymnasium-style API without requiring gymnasium to be installed."""
+import numpy as np
+from src.physics.dynamics import Body, step as physics_step
+from src.env.observation import observe
+from src.env.reward import reward
+from src.terrain.pink_noise import generate
+from src.terrain.periodic_field import sample
+
+
+class FractalEnv:
+    def __init__(self, cfg, terrain=None, seed=None):
+        self.cfg = cfg
+        self.rng = np.random.default_rng(cfg['training']['seed'] if seed is None else seed)
+        self.terrain = terrain if terrain is not None else generate(cfg['terrain'])
+        self.body = None
+        self.previous_action = np.zeros(2, dtype=np.float32)
+        self.steps = 0
+        self.distance = 0.0
+
+    def reset(self, seed=None, terrain=None):
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+        if terrain is not None:
+            self.terrain = terrain
+        width = self.terrain.size * self.terrain.pixel_size
+        if self.cfg['environment'].get('random_start_position', True):
+            # Uniform starts cover the fundamental tile; periodic sampling then
+            # makes every translated tile physically equivalent.
+            position = self.rng.uniform(0, width, size=2)
+        else:
+            position = np.full(2, width / 2.0)
+        heading = float(self.rng.uniform(-np.pi, np.pi))
+        pcfg = self.cfg['physics']
+        v = float(self.rng.uniform(pcfg['initial_speed_min'], pcfg['initial_speed_max']))
+        self.body = Body(position, v * np.array([np.cos(heading), np.sin(heading)]),
+                         heading, float(pcfg['mass']))
+        self.previous_action = np.zeros(2, dtype=np.float32)
+        self.steps = 0
+        self.distance = 0.0
+        return observe(self.body, self.terrain, self.cfg['agent'], self.previous_action), {}
+
+    def step(self, action):
+        if self.body is None:
+            raise RuntimeError('reset() must be called before step()')
+        action = np.asarray(action, dtype=np.float32)
+        if action.shape != (2,) or not np.all(np.isfinite(action)):
+            raise ValueError('action must be a finite two-element vector')
+        action = np.clip(action, -1.0, 1.0)
+        dist, _ = physics_step(self.body, action, self.terrain, self.cfg['physics'])
+        # Info is consistently post-step: position, speed, and potential refer
+        # to the same state visible in the returned observation.
+        potential = float(sample(self.terrain.potential, *self.body.position, self.terrain.pixel_size))
+        rew = reward(dist, action, self.previous_action, self.cfg['physics']['dt'], self.cfg['reward'])
+        self.previous_action = action.copy()
+        self.steps += 1
+        self.distance += dist
+        truncated = self.steps >= int(self.cfg['environment']['episode_steps'])
+        obs = observe(self.body, self.terrain, self.cfg['agent'], self.previous_action)
+        info = {'speed': float(np.linalg.norm(self.body.velocity)), 'distance_step': dist,
+                'episode_distance': self.distance, 'mean_speed': self.distance / (self.steps * self.cfg['physics']['dt']),
+                'potential': potential, 'position': self.body.position.copy()}
+        return obs, rew, False, truncated, info
+
+
+================================================================================
+FILE: src/env/observation.py
+================================================================================
+
+"""Velocity/heading-aligned 32x32 local potential and proprioception."""
+import numpy as np
+from src.terrain.periodic_field import sample
+
+
+def observe(body, terrain, cfg, previous_action):
+    size = int(cfg['fov_size'])
+    if size < 2:
+        raise ValueError('fov_size must be >= 2')
+    pixel = float(cfg['fov_pixel_size'])
+    if pixel <= 0:
+        raise ValueError('fov_pixel_size must be positive')
+    speed = float(np.linalg.norm(body.velocity))
+    heading = np.arctan2(body.velocity[1], body.velocity[0]) if speed > 1e-6 else body.heading
+    forward = np.array([np.cos(heading), np.sin(heading)])
+    convention = cfg.get('steering_convention', 'left')
+    if convention not in {'left', 'right'}:
+        raise ValueError("steering_convention must be 'left' or 'right'")
+    # Preserve old left-positive checkpoints, while new runs use a consistent
+    # positive-right image/state/action convention.
+    right = np.array([forward[1], -forward[0]])
+    if convention == 'left':
+        right = -right
+    offsets = (np.arange(size, dtype=np.float64) - (size - 1) / 2.0) * pixel
+    horizontal, vertical = np.meshgrid(offsets, -offsets)
+    x = body.position[0] + horizontal * right[0] + vertical * forward[0]
+    y = body.position[1] + horizontal * right[1] + vertical * forward[1]
+    patch = sample(terrain.potential, x, y, terrain.pixel_size).astype(np.float32)[None, :, :]
+    local_v = np.array([np.dot(body.velocity, forward), np.dot(body.velocity, right)])
+    velocity_scale = float(cfg['velocity_scale'])
+    state = np.array([local_v[0] / velocity_scale, local_v[1] / velocity_scale,
+                      speed / velocity_scale, body.mass / float(cfg['mass_scale']),
+                      *previous_action], dtype=np.float32)
+    return {'terrain': patch, 'state': state}
+
+
+================================================================================
+FILE: src/env/reward.py
+================================================================================
+
+"""Speed reward integrates distance so maximizing return maximizes average speed."""
+import numpy as np
+
+
+def reward(distance, action, previous_action, dt, cfg):
+    action = np.asarray(action)
+    previous_action = np.asarray(previous_action)
+    return float(cfg['speed_weight'] * distance - dt * (
+        cfg['control_penalty'] * np.dot(action, action)
+        + cfg['action_change_penalty'] * np.sum((action - previous_action)**2)))
+
+
+================================================================================
+FILE: src/physics/__init__.py
+================================================================================
+
+
+
+================================================================================
+FILE: src/physics/dynamics.py
+================================================================================
+
+"""Continuous 2D dynamics with control, potential acceleration, and linear damping."""
+from dataclasses import dataclass
+import numpy as np
+from src.terrain.periodic_field import sample, sample_gradient
+
+
+@dataclass
+class Body:
+    position: np.ndarray
+    velocity: np.ndarray
+    heading: float
+    mass: float
+
+
+def velocity_frame(body, cfg):
+    """Return unit vectors parallel and right-perpendicular to the current heading.
+
+    At non-zero speed the frame follows velocity.  At rest it falls back to
+    the stored heading, matching the control semantics used by the integrator.
+    """
+    speed = float(np.linalg.norm(body.velocity))
+    if speed > float(cfg['heading_epsilon']):
+        forward = body.velocity / speed
+    else:
+        forward = np.array([np.cos(body.heading), np.sin(body.heading)])
+    return forward, np.array([forward[1], -forward[0]])
+
+
+def acceleration_components(body, action, terrain, cfg):
+    """Return control, conservative-field, damping acceleration, and local phi."""
+    velocity = body.velocity
+    forward, right = velocity_frame(body, cfg)
+    convention = cfg.get('steering_convention', 'left')
+    if convention not in {'left', 'right'}:
+        raise ValueError("steering_convention must be 'left' or 'right'")
+    lateral = right if convention == 'right' else -right
+    throttle, steer = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
+    forward_limit = float(cfg['max_forward_acceleration'])
+    power_limit = cfg.get('power_limit')
+    if power_limit is not None:
+        power_limit = float(power_limit)
+        speed_epsilon = float(cfg.get('power_speed_epsilon', 0.1))
+        if power_limit <= 0 or speed_epsilon <= 0:
+            raise ValueError('power_limit and power_speed_epsilon must be positive')
+        # Both thrust and braking are limited by the magnitude of longitudinal
+        # mechanical power m |a_parallel| |v|.  The zero-speed guard retains
+        # the configured acceleration cap for launch.
+        forward_limit = min(forward_limit, power_limit / (body.mass * max(float(np.linalg.norm(velocity)), speed_epsilon)))
+    control = (forward_limit * throttle * forward
+               + float(cfg['max_perpendicular_acceleration']) * steer * lateral)
+    x, y = body.position
+    potential_value = float(sample(terrain.potential, x, y, terrain.pixel_size))
+    # Use the analytic derivative of exactly the same bilinear potential that
+    # supplies potential_value.  The field is therefore conservative within
+    # each interpolation cell, rather than a separately interpolated gradient.
+    grad = np.asarray(sample_gradient(terrain.potential, x, y, terrain.pixel_size), dtype=np.float64)
+    potential_acceleration = -float(cfg['potential_scale']) * grad / float(terrain.gradient_reference)
+    damping_acceleration = -float(cfg['linear_damping']) * velocity
+    return control, potential_acceleration, damping_acceleration, potential_value
+
+
+def acceleration(body, action, terrain, cfg):
+    control, potential_acceleration, damping_acceleration, potential_value = acceleration_components(
+        body, action, terrain, cfg)
+    return control + potential_acceleration + damping_acceleration, potential_value
+
+
+def step(body, action, terrain, cfg):
+    """Semi-implicit Euler; return mean substep speed for distance/time reward."""
+    dt = float(cfg['dt']) / int(cfg['substeps'])
+    if dt <= 0 or int(cfg['substeps']) < 1 or body.mass <= 0:
+        raise ValueError('dt, substeps and mass must be positive')
+    integral_speed = 0.0
+    potential = 0.0
+    for _ in range(int(cfg['substeps'])):
+        acc, potential = acceleration(body, action, terrain, cfg)
+        old_speed = np.linalg.norm(body.velocity)
+        body.velocity = body.velocity + dt * acc
+        # Trapezoidal speed quadrature approximates distance traveled.
+        integral_speed += 0.5 * (old_speed + np.linalg.norm(body.velocity)) * dt
+        body.position = body.position + dt * body.velocity
+        if np.linalg.norm(body.velocity) > float(cfg['heading_epsilon']):
+            body.heading = float(np.arctan2(body.velocity[1], body.velocity[0]))
+    return integral_speed, potential
+
+
+================================================================================
+FILE: src/rl/__init__.py
+================================================================================
+
+
+
+================================================================================
+FILE: src/rl/policy.py
+================================================================================
+
+"""CNN actor-critic with tanh-squashed Gaussian actions and exact log-probability."""
+import numpy as np
+import torch
+from torch import nn
+from torch.distributions import Normal
+
+
+class ActorCritic(nn.Module):
+    def __init__(self, fov_size=32, state_dim=6, architecture='shared'):
+        super().__init__()
+        if architecture not in {'shared', 'unshared'}:
+            raise ValueError("architecture must be 'shared' or 'unshared'")
+        self.architecture = architecture
+
+        def make_cnn():
+            return nn.Sequential(nn.Conv2d(1, 16, 5, stride=2), nn.ReLU(),
+                                 nn.Conv2d(16, 32, 3, stride=2), nn.ReLU(), nn.Flatten())
+
+        def make_encoder(channels):
+            return nn.Sequential(nn.Linear(channels + state_dim, 128), nn.Tanh(),
+                                 nn.Linear(128, 128), nn.Tanh())
+
+        # Keep the original module names in the shared variant: old checkpoints
+        # remain loadable, while unshared is a directly comparable ablation.
+        self.cnn = make_cnn()
+        with torch.no_grad():
+            channels = self.cnn(torch.zeros(1, 1, fov_size, fov_size)).shape[-1]
+        self.encoder = make_encoder(channels)
+        if architecture == 'unshared':
+            self.critic_cnn = make_cnn()
+            self.critic_encoder = make_encoder(channels)
+        self.actor = nn.Linear(128, 2)
+        self.critic = nn.Linear(128, 1)
+        self.log_std = nn.Parameter(torch.full((2,), -0.5))
+
+    def encode(self, terrain, state):
+        """Return the actor representation (shared representation when selected)."""
+        return self.encoder(torch.cat([self.cnn(terrain), state], dim=-1))
+
+    def encode_critic(self, terrain, state):
+        if self.architecture == 'shared':
+            return self.encode(terrain, state)
+        return self.critic_encoder(torch.cat([self.critic_cnn(terrain), state], dim=-1))
+
+    def forward(self, terrain, state):
+        return self.actor(self.encode(terrain, state)), self.critic(self.encode_critic(terrain, state)).squeeze(-1)
+
+    def distribution(self, terrain, state):
+        mean, value = self(terrain, state)
+        return Normal(mean, self.log_std.clamp(-5, 2).exp().expand_as(mean)), value
+
+    @staticmethod
+    def log_prob(dist, raw):
+        # Stable log(1-tanh(x)^2) = 2(log(2)-x-softplus(-2x)).
+        correction = 2 * (np.log(2.0) - raw - torch.nn.functional.softplus(-2 * raw))
+        return (dist.log_prob(raw) - correction).sum(-1)
+
+    def act(self, terrain, state, deterministic=False):
+        dist, value = self.distribution(terrain, state)
+        raw = dist.mean if deterministic else dist.sample()
+        return torch.tanh(raw), raw, self.log_prob(dist, raw), value
+
+
+def tensor_obs(observations, device):
+    return (torch.as_tensor(np.stack([o['terrain'] for o in observations]), dtype=torch.float32, device=device),
+            torch.as_tensor(np.stack([o['state'] for o in observations]), dtype=torch.float32, device=device))
+
+
+================================================================================
+FILE: src/rl/rollout.py
+================================================================================
+
+"""GAE: bootstrap time-limit truncations, but do not bridge reset episodes."""
+import numpy as np
+
+
+def compute_gae(rewards, values, next_values, terminated, ended, gamma, gae_lambda):
+    # Arrays [time, env]. Terminated suppresses bootstrapping, ended suppresses GAE carryover.
+    advantage = np.zeros_like(rewards, dtype=np.float32)
+    following = np.zeros(rewards.shape[1], dtype=np.float32)
+    for t in range(len(rewards) - 1, -1, -1):
+        delta = rewards[t] + gamma * next_values[t] * (1 - terminated[t]) - values[t]
+        following = delta + gamma * gae_lambda * (1 - ended[t]) * following
+        advantage[t] = following
+    return advantage, advantage + values
+
+
+================================================================================
+FILE: src/rl/trainer.py
+================================================================================
+
+"""Synchronous vectorized-environment PPO baseline with reproducible checkpoints."""
+import csv
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import random
+import numpy as np
+import torch
+from src.rl.policy import ActorCritic, tensor_obs
+from src.rl.rollout import compute_gae
+from src.env.fractal_env import FractalEnv
+from src.terrain.pink_noise import generate
+from src.utils.config import save_config
+
+
+def _step_environment(item):
+    """Top-level worker target so independent NumPy environments can step concurrently."""
+    environment, action = item
+    return environment.step(action)
+
+
+def evaluate(policy, cfg, device, episodes_per_seed=1):
+    scores = []
+    for seed in cfg['environment']['evaluation_terrain_seeds']:
+        terrain = generate(cfg['terrain'], seed=int(seed))
+        env = FractalEnv(cfg, terrain=terrain, seed=int(seed))
+        for rep in range(episodes_per_seed):
+            obs, _ = env.reset(seed=int(seed) + rep * 10000)
+            done = False
+            while not done:
+                with torch.no_grad():
+                    t, s = tensor_obs([obs], device)
+                    action, _, _, _ = policy.act(t, s, deterministic=True)
+                obs, _, term, trunc, info = env.step(action[0].cpu().numpy())
+                done = term or trunc
+            scores.append(info['mean_speed'])
+    return float(np.mean(scores)), float(np.std(scores))
+
+
+def train(cfg, device='cpu', max_steps=None):
+    tc = cfg['training']
+    seed = int(tc['seed'])
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.set_num_threads(min(4, torch.get_num_threads()))
+    output = Path(cfg['output']['dump_dir'])
+    (output / 'checkpoints').mkdir(parents=True, exist_ok=True)
+    (output / 'metrics').mkdir(parents=True, exist_ok=True)
+    save_config(cfg, output / 'resolved_config.yaml')
+    train_seeds = {int(cfg['terrain']['seed']) + i for i in range(int(cfg['environment']['training_terrain_count']))}
+    evaluation_seeds = {int(seed) for seed in cfg['environment']['evaluation_terrain_seeds']}
+    if train_seeds & evaluation_seeds:
+        raise ValueError(f'training and evaluation terrain seeds overlap: {sorted(train_seeds & evaluation_seeds)}')
+    terrain_bank = [generate(cfg['terrain'], seed=seed) for seed in sorted(train_seeds)]
+    rng = np.random.default_rng(seed)
+    n = int(cfg['environment']['num_parallel_envs'])
+    environments = [FractalEnv(cfg, terrain=terrain_bank[i % len(terrain_bank)], seed=seed + i)
+                    for i in range(n)]
+    obs = [env.reset()[0] for env in environments]
+    policy = ActorCritic(cfg['agent']['fov_size'], architecture=cfg['agent'].get('architecture', 'shared')).to(device)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=float(tc['learning_rate']))
+    target = int(max_steps if max_steps is not None else tc['total_timesteps'])
+    count = 0
+    next_eval = int(tc['evaluation_interval'])
+    next_checkpoint = int(tc['checkpoint_interval'])
+    metrics = output / 'metrics' / 'training.csv'
+    workers = int(tc.get('parallel_env_workers', 1))
+    if workers < 1:
+        raise ValueError('training.parallel_env_workers must be positive')
+    executor = ThreadPoolExecutor(max_workers=min(workers, n)) if workers > 1 else None
+    with metrics.open('w', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=['steps', 'rollout_mean_speed', 'evaluation_mean_speed', 'evaluation_std_speed', 'policy_loss', 'value_loss'])
+        writer.writeheader()
+        while count < target:
+            storage = {k: [] for k in ['terrain', 'state', 'raw', 'logp', 'value', 'reward', 'next_value', 'terminated', 'ended']}
+            speed_samples = []
+            horizon = min(int(tc['rollout_steps']), max(1, (target - count + n - 1) // n))
+            for _ in range(horizon):
+                with torch.no_grad():
+                    terrain_tensor, state_tensor = tensor_obs(obs, device)
+                    actions, raw, logp, value = policy.act(terrain_tensor, state_tensor)
+                storage['terrain'].append(terrain_tensor.cpu().numpy())
+                storage['state'].append(state_tensor.cpu().numpy())
+                storage['raw'].append(raw.cpu().numpy())
+                storage['logp'].append(logp.cpu().numpy())
+                storage['value'].append(value.cpu().numpy())
+                next_obs, next_values, rewards, terminated, ended = [], [], [], [], []
+                action_np = actions.cpu().numpy()
+                results = (list(executor.map(_step_environment, zip(environments, action_np)))
+                           if executor is not None else
+                           [env.step(action_np[i]) for i, env in enumerate(environments)])
+                for o, r, term, trunc, info in results:
+                    rewards.append(r)
+                    terminated.append(float(term))
+                    ended.append(float(term or trunc))
+                    speed_samples.append(info['speed'])
+                    next_obs.append(o)
+                # Critic on actual terminal observations BEFORE resetting time-limited episodes.
+                with torch.no_grad():
+                    tt, ss = tensor_obs(next_obs, device)
+                    _, bootstrap = policy(tt, ss)
+                    next_values = bootstrap.cpu().numpy()
+                for i, finished in enumerate(ended):
+                    if finished:
+                        new_terrain = terrain_bank[int(rng.integers(len(terrain_bank)))]
+                        next_obs[i], _ = environments[i].reset(terrain=new_terrain)
+                obs = next_obs
+                storage['reward'].append(rewards)
+                storage['next_value'].append(next_values)
+                storage['terminated'].append(terminated)
+                storage['ended'].append(ended)
+            data = {key: np.asarray(value, dtype=np.float32) for key, value in storage.items()}
+            advantages, returns = compute_gae(data['reward'], data['value'], data['next_value'],
+                                               data['terminated'], data['ended'],
+                                               float(tc['gamma']), float(tc['gae_lambda']))
+            batch_size = horizon * n
+            flatten = lambda value: torch.as_tensor(value.reshape((batch_size,) + value.shape[2:]), device=device)
+            terrains, states = flatten(data['terrain']), flatten(data['state'])
+            raws, old_logp, old_value = flatten(data['raw']), flatten(data['logp']), flatten(data['value'])
+            adv, ret = flatten(advantages), flatten(returns)
+            adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
+            policy_loss = value_loss = 0.0
+            for _ in range(int(tc['update_epochs'])):
+                for indices in torch.randperm(batch_size, device=device).split(int(tc['minibatch_size'])):
+                    dist, val = policy.distribution(terrains[indices], states[indices])
+                    new_logp = policy.log_prob(dist, raws[indices])
+                    ratio = (new_logp - old_logp[indices]).exp()
+                    clipped = ratio.clamp(1 - float(tc['clip_range']), 1 + float(tc['clip_range']))
+                    p_loss = -torch.minimum(ratio * adv[indices], clipped * adv[indices]).mean()
+                    value_clip = tc.get('value_clip_range')
+                    if value_clip is None:
+                        v_loss = 0.5 * (val - ret[indices]).square().mean()
+                    else:
+                        clipped_value = old_value[indices] + (val - old_value[indices]).clamp(
+                            -float(value_clip), float(value_clip))
+                        v_loss = 0.5 * torch.maximum((val - ret[indices]).square(),
+                                                     (clipped_value - ret[indices]).square()).mean()
+                    # Gaussian pre-squash entropy is a proxy, not exact squashed entropy.
+                    loss = p_loss + float(tc['value_coef']) * v_loss - float(tc['entropy_coef']) * dist.entropy().sum(-1).mean()
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(policy.parameters(), float(tc['max_grad_norm']))
+                    optimizer.step()
+                    policy_loss, value_loss = float(p_loss.item()), float(v_loss.item())
+            count += horizon * n
+            mean_eval = std_eval = float('nan')
+            if count >= next_eval or count >= target:
+                mean_eval, std_eval = evaluate(policy, cfg, device)
+                next_eval = count + int(tc['evaluation_interval'])
+            if count >= next_checkpoint or count >= target:
+                torch.save({'model': policy.state_dict(), 'optimizer': optimizer.state_dict(),
+                            'steps': count, 'config': cfg, 'torch_rng': torch.get_rng_state(),
+                            'numpy_rng': rng.bit_generator.state, 'python_rng': random.getstate()},
+                           output / 'checkpoints' / f'ppo_{count:09d}.pt')
+                next_checkpoint = count + int(tc['checkpoint_interval'])
+            writer.writerow(dict(steps=count, rollout_mean_speed=float(np.mean(speed_samples)),
+                                 evaluation_mean_speed=mean_eval, evaluation_std_speed=std_eval,
+                                 policy_loss=policy_loss, value_loss=value_loss))
+            file.flush()
+            eval_label = f'{mean_eval:.3f}' if np.isfinite(mean_eval) else 'pending'
+            print(f'steps={count} rollout_speed={np.mean(speed_samples):.3f} eval_speed={eval_label}', flush=True)
+    if executor is not None:
+        executor.shutdown()
+    return policy
+
+
+def load_policy(path, device='cpu', trusted_legacy=False):
+    """Load an inference checkpoint without unpickling arbitrary Python by default."""
+    checkpoint = torch.load(path, map_location=device, weights_only=not trusted_legacy)
+    cfg = checkpoint['config']
+    # Checkpoints saved before the architecture option are the original shared model.
+    policy = ActorCritic(cfg['agent']['fov_size'], architecture=cfg['agent'].get('architecture', 'shared')).to(device)
+    policy.load_state_dict(checkpoint['model'])
+    policy.eval()
+    return policy, cfg
+
+
+================================================================================
+FILE: src/terrain/__init__.py
+================================================================================
+
+
+
+================================================================================
+FILE: src/terrain/periodic_field.py
+================================================================================
+
+"""Periodic bilinear interpolation in physical world units, including negative positions."""
+import numpy as np
+
+
+def sample(field, x, y, pixel_size=1.0):
+    n_y, n_x = field.shape
+    xx = np.asarray(x, dtype=np.float64) / pixel_size
+    yy = np.asarray(y, dtype=np.float64) / pixel_size
+    x0 = np.floor(xx).astype(np.int64)
+    y0 = np.floor(yy).astype(np.int64)
+    fx = xx - x0
+    fy = yy - y0
+    a = field[y0 % n_y, x0 % n_x]
+    b = field[y0 % n_y, (x0 + 1) % n_x]
+    c = field[(y0 + 1) % n_y, x0 % n_x]
+    d = field[(y0 + 1) % n_y, (x0 + 1) % n_x]
+    return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy
+
+
+def sample_gradient(field, x, y, pixel_size=1.0):
+    """Exact gradient of the periodic bilinear interpolant returned by ``sample``."""
+    n_y, n_x = field.shape
+    xx = np.asarray(x, dtype=np.float64) / pixel_size
+    yy = np.asarray(y, dtype=np.float64) / pixel_size
+    x0 = np.floor(xx).astype(np.int64)
+    y0 = np.floor(yy).astype(np.int64)
+    fx, fy = xx - x0, yy - y0
+    a = field[y0 % n_y, x0 % n_x]
+    b = field[y0 % n_y, (x0 + 1) % n_x]
+    c = field[(y0 + 1) % n_y, x0 % n_x]
+    d = field[(y0 + 1) % n_y, (x0 + 1) % n_x]
+    gradient_x = ((b - a) * (1 - fy) + (d - c) * fy) / pixel_size
+    gradient_y = ((c - a) * (1 - fx) + (d - b) * fx) / pixel_size
+    return np.stack((gradient_x, gradient_y), axis=-1)
+
+
+================================================================================
+FILE: src/terrain/pink_noise.py
+================================================================================
+
+"""Periodic mean-centered Gaussian field, squared potential, and derivatives."""
+from dataclasses import dataclass
+import numpy as np
+
+
+@dataclass
+class Terrain:
+    intensity: np.ndarray
+    potential: np.ndarray
+    gradient_x: np.ndarray
+    gradient_y: np.ndarray
+    gradient_reference: float
+    pixel_size: float = 1.0
+
+    @property
+    def size(self):
+        return self.potential.shape[0]
+
+
+def generate(cfg, seed=None):
+    n = int(cfg['resolution'])
+    if n < 4:
+        raise ValueError('resolution must be >= 4')
+    dx = float(cfg['pixel_size'])
+    if dx <= 0:
+        raise ValueError('pixel_size must be positive')
+    rng = np.random.default_rng(cfg['seed'] if seed is None else seed)
+    white = rng.standard_normal((n, n))
+    freq_y = np.fft.fftfreq(n, d=dx)[:, None]
+    freq_x = np.fft.rfftfreq(n, d=dx)[None, :]
+    radius = np.sqrt(freq_x**2 + freq_y**2)
+    # Soft infrared cutoff suppresses the singular DC component.
+    cutoff = 1.0 / (n * dx)
+    weight = (radius**2 + cutoff**2)**(-float(cfg['spectral_exponent']) / 4.0)
+    weight[0, 0] = 0.0
+    field = np.fft.irfft2(np.fft.rfft2(white) * weight, s=(n, n)).real
+    # The filtered field is Gaussian. Remove its finite-sample DC offset and
+    # standardize it before squaring, so phi is centered-Gaussian energy with
+    # a stable observation scale across resolutions and terrain seeds.
+    intensity = field - field.mean()
+    standard_deviation = float(np.std(intensity))
+    if not np.isfinite(intensity).all() or standard_deviation <= 1e-12:
+        raise ValueError('noise has zero dynamic range')
+    intensity /= standard_deviation
+    potential = intensity ** 2
+    # Derivatives at bilinear-cell centres.  This is the same interpolant used
+    # by physics, so its percentile provides a consistent field normalization.
+    east = np.roll(potential, -1, axis=1)
+    south = np.roll(potential, -1, axis=0)
+    southeast = np.roll(south, -1, axis=1)
+    gx = 0.5 * ((east - potential) + (southeast - south)) / dx
+    gy = 0.5 * ((south - potential) + (southeast - east)) / dx
+    gradient_norm = np.sqrt(gx**2 + gy**2)
+    percentile = float(cfg.get('gradient_normalization_percentile', 95.0))
+    if not 0 < percentile <= 100:
+        raise ValueError('gradient_normalization_percentile must be in (0, 100]')
+    gradient_reference = float(np.percentile(gradient_norm, percentile))
+    if gradient_reference <= 1e-12:
+        raise ValueError('potential gradient has zero scale')
+    gx /= gradient_reference
+    gy /= gradient_reference
+    return Terrain(intensity.astype(np.float32), potential.astype(np.float32),
+                   gx.astype(np.float32), gy.astype(np.float32), gradient_reference, dx)
+
+
+================================================================================
+FILE: src/utils/__init__.py
+================================================================================
+
+
+
+================================================================================
+FILE: src/utils/config.py
+================================================================================
+
+"""YAML configuration with optional recursive overlays and dot-path CLI overrides."""
+from pathlib import Path
+import copy
+import yaml
+
+DEFAULT = Path(__file__).resolve().parents[2] / 'config' / 'default.yaml'
+
+
+def merge(dst, src):
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            merge(dst[key], value)
+        else:
+            dst[key] = copy.deepcopy(value)
+    return dst
+
+
+def load_config(path=None, overlays=(), overrides=()):
+    with DEFAULT.open() as f:
+        cfg = yaml.safe_load(f)
+    for name in ([path] if path else []) + list(overlays):
+        with Path(name).open() as f:
+            merge(cfg, yaml.safe_load(f) or {})
+    for entry in overrides:
+        key, sep, raw = entry.partition('=')
+        if not sep:
+            raise ValueError(f'Override must be section.key=value: {entry}')
+        target = cfg
+        parts = key.split('.')
+        for part in parts[:-1]:
+            if part not in target or not isinstance(target[part], dict):
+                raise KeyError(key)
+            target = target[part]
+        if parts[-1] not in target:
+            raise KeyError(key)
+        target[parts[-1]] = yaml.safe_load(raw)
+    return cfg
+
+
+def save_config(cfg, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('w') as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+
+
+================================================================================
+FILE: src/visualization/__init__.py
+================================================================================
+
+
+
+================================================================================
+FILE: src/visualization/renderer.py
+================================================================================
+
+"""Local camera view and trajectory overlay in image frames."""
+import numpy as np
+from PIL import Image, ImageDraw
+from src.terrain.periodic_field import sample
+
+
+def frame(env, trail, canvas_size=640, view_world=96.0):
+    n = canvas_size
+    coordinate = (np.arange(n) - (n - 1) / 2) * view_world / n
+    xx, yy = np.meshgrid(coordinate, -coordinate)
+    pos = env.body.position
+    image_field = sample(env.terrain.potential, pos[0] + xx, pos[1] + yy, env.terrain.pixel_size)
+    minimum = 0.0
+    maximum = max(float(env.terrain.potential.max()), 1e-8)
+    normalized = np.clip((image_field - minimum) / max(maximum - minimum, 1e-8), 0, 1)
+    image = Image.fromarray(np.uint8(255 * (1 - normalized)), mode='L').convert('RGB')
+    draw = ImageDraw.Draw(image)
+    scale = n / view_world
+    points = [(n / 2 + (p[0] - pos[0]) * scale, n / 2 - (p[1] - pos[1]) * scale) for p in trail]
+    if len(points) > 1:
+        draw.line(points, fill=(40, 110, 240), width=2)
+    cx = cy = n / 2
+    fov = env.cfg['agent']['fov_size'] * env.cfg['agent']['fov_pixel_size'] * scale / 2
+    draw.rectangle((cx - fov, cy - fov, cx + fov, cy + fov), outline=(255, 210, 30), width=2)
+    draw.ellipse((cx - 5, cy - 5, cx + 5, cy + 5), fill=(240, 50, 50))
+    direction = env.body.velocity / max(np.linalg.norm(env.body.velocity), 1e-8)
+    draw.line((cx, cy, cx + direction[0] * 28, cy - direction[1] * 28), fill=(255, 40, 40), width=3)
+    draw.text((10, 10), f'Speed: {np.linalg.norm(env.body.velocity):.2f}  Mean: {env.distance / max(env.steps * env.cfg["physics"]["dt"], 1e-8):.2f}', fill=(255, 40, 40), stroke_width=1, stroke_fill='white')
+    return np.asarray(image)
+
+
+================================================================================
+FILE: src/visualization/video.py
+================================================================================
+
+"""MP4 or GIF export via imageio; GIF works without ffmpeg."""
+from pathlib import Path
+import imageio.v2 as imageio
+
+
+def save_video(frames, path, fps=30):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix.lower() == '.gif':
+        imageio.mimsave(path, frames, duration=1.0 / fps)
+    else:
+        with imageio.get_writer(path, fps=fps, codec='libx264', macro_block_size=16) as writer:
+            for frame in frames:
+                writer.append_data(frame)
+    return path
+
+
+================================================================================
+FILE: driver/analyze_checkpoints.py
+================================================================================
+
+"""Compare deterministic inference trajectories from up to ten PPO checkpoints.
+
+Example:
+  python -m driver.analyze_checkpoints 'dumps/strong_field/checkpoints/ppo_*.pt' --device cuda
+"""
+import argparse
+import csv
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from src.env.fractal_env import FractalEnv
+from src.physics.dynamics import acceleration_components
+from src.rl.policy import tensor_obs
+from src.rl.trainer import load_policy
+from src.terrain.pink_noise import generate
+from src.terrain.periodic_field import sample
+
+
+def checkpoint_step(path: Path) -> int:
+    """Read the numerical PPO step from a standard checkpoint filename."""
+    return int(path.stem.rsplit('_', 1)[-1])
+
+
+def choose_checkpoints(pattern: str, limit: int) -> list[Path]:
+    paths = sorted(Path().glob(pattern), key=checkpoint_step)
+    if not paths:
+        raise FileNotFoundError(f'No checkpoints match {pattern!r}')
+    if len(paths) <= limit:
+        return paths
+    indices = np.unique(np.linspace(0, len(paths) - 1, limit, dtype=int))
+    return [paths[index] for index in indices]
+
+
+def infer(checkpoint: Path, device: str, seed: int, steps: int) -> tuple[dict, list[dict]]:
+    policy, cfg = load_policy(checkpoint, device)
+    policy.eval()
+    terrain = generate(cfg['terrain'], seed=seed)
+    env = FractalEnv(cfg, terrain=terrain, seed=seed)
+    observation, _ = env.reset(seed=seed)
+    rows = []
+    for step in range(steps):
+        with torch.no_grad():
+            terrain_t, state_t = tensor_obs([observation], device)
+            action, _, _, _ = policy.act(terrain_t, state_t, deterministic=True)
+        action_np = action[0].cpu().numpy()
+        control, field, damping, _ = acceleration_components(env.body, action_np, terrain, cfg['physics'])
+        position = env.body.position.copy()
+        velocity = env.body.velocity.copy()
+        speed = float(np.linalg.norm(velocity))
+        potential = float(sample(terrain.potential, *position, terrain.pixel_size))
+        observation, _, terminated, truncated, info = env.step(action_np)
+        rows.append({
+            'step': step,
+            # Every quantity in this row describes the pre-step observation
+            # acted on by action_np, including the acceleration components.
+            'x': float(position[0]), 'y': float(position[1]),
+            'vx': float(velocity[0]), 'vy': float(velocity[1]),
+            'speed': speed, 'potential': potential,
+            'throttle': float(action_np[0]), 'steering': float(action_np[1]),
+            'control_acceleration': float(np.linalg.norm(control)),
+            'potential_acceleration': float(np.linalg.norm(field)),
+            'damping_acceleration': float(np.linalg.norm(damping)),
+            'net_acceleration': float(np.linalg.norm(control + field + damping)),
+        })
+        if terminated or truncated:
+            break
+    return {'cfg': cfg, 'terrain': terrain}, rows
+
+
+def write_dump(rows: list[dict], destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open('w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def history_plot(results: list[tuple[Path, list[dict]]], destination: Path) -> None:
+    colors = plt.get_cmap('viridis')(np.linspace(0.08, 0.92, len(results)))
+    figure, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True, constrained_layout=True)
+    for color, (checkpoint, rows) in zip(colors, results):
+        values = {key: np.asarray([row[key] for row in rows]) for key in rows[0]}
+        label = f'{checkpoint_step(checkpoint):,}'
+        axes[0].plot(values['step'], values['speed'], color=color, label=label)
+        axes[1].plot(values['step'], values['net_acceleration'], color=color, label=label)
+        axes[2].plot(values['step'], values['potential'], color=color, label=label)
+    axes[0].set(title='Velocity during deterministic inference', ylabel='speed')
+    axes[1].set(title='Net acceleration during deterministic inference', ylabel='acceleration magnitude')
+    axes[2].set(title='Potential encountered during deterministic inference', xlabel='environment step', ylabel='potential')
+    for axis in axes:
+        axis.grid(alpha=0.25)
+    axes[0].legend(title='checkpoint step', ncol=2, fontsize=8, frameon=False)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure.text(0.01, 0.005, f'Inference CSV dumps: {destination.parent.parent / "inference_dumps"}',
+                fontsize=8, color='#374151')
+    figure.savefig(destination, dpi=180)
+    plt.close(figure)
+
+
+def trajectory_plot(results: list[tuple[Path, list[dict]]], terrain, destination: Path) -> None:
+    count = len(results)
+    columns = min(5, count)
+    rows_count = int(np.ceil(count / columns))
+    figure, axes = plt.subplots(rows_count, columns, figsize=(3.2 * columns, 3.2 * rows_count), squeeze=False,
+                                constrained_layout=True)
+    for axis in axes.flat:
+        axis.set_visible(False)
+    for axis, (checkpoint, rows) in zip(axes.flat, results):
+        axis.set_visible(True)
+        positions = np.asarray([[row['x'], row['y']] for row in rows])
+        pad = 12.0
+        x_min, x_max = positions[:, 0].min() - pad, positions[:, 0].max() + pad
+        y_min, y_max = positions[:, 1].min() - pad, positions[:, 1].max() + pad
+        grid_x = np.linspace(x_min, x_max, 150)
+        grid_y = np.linspace(y_min, y_max, 150)
+        mesh_x, mesh_y = np.meshgrid(grid_x, grid_y)
+        potential = sample(terrain.potential, mesh_x, mesh_y, terrain.pixel_size)
+        axis.contourf(mesh_x, mesh_y, potential, levels=24, cmap='viridis_r')
+        axis.plot(positions[:, 0], positions[:, 1], color='#ef4444', linewidth=1.25)
+        axis.scatter(*positions[0], s=18, color='white', edgecolor='#111827', zorder=3)
+        axis.set(title=f'{checkpoint_step(checkpoint):,} steps', aspect='equal', xticks=[], yticks=[])
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure.text(0.01, 0.005, f'Inference CSV dumps: {destination.parent.parent / "inference_dumps"}',
+                fontsize=8, color='#374151')
+    figure.savefig(destination, dpi=180)
+    plt.close(figure)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('checkpoints', help='Glob such as dumps/strong_field/checkpoints/ppo_*.pt')
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--seed', type=int, default=100001)
+    parser.add_argument('--steps', type=int, default=2000)
+    parser.add_argument('--limit', type=int, default=10)
+    parser.add_argument('--output-dir', default=None)
+    args = parser.parse_args()
+    if args.limit < 1 or args.steps < 1:
+        parser.error('--limit and --steps must be positive')
+    checkpoints = choose_checkpoints(args.checkpoints, args.limit)
+    results, terrain = [], None
+    for checkpoint in checkpoints:
+        context, rows = infer(checkpoint, args.device, args.seed, args.steps)
+        root = Path(args.output_dir or context['cfg']['output']['dump_dir'])
+        write_dump(rows, root / 'inference_dumps' / f'inference_{checkpoint.stem}_seed{args.seed}.csv')
+        results.append((checkpoint, rows))
+        terrain = context['terrain']
+    history_plot(results, root / 'plots' / f'inference_histories_seed{args.seed}.png')
+    trajectory_plot(results, terrain, root / 'plots' / f'inference_trajectories_seed{args.seed}.png')
+    print(f'Wrote {len(results)} inference dumps to {root / "inference_dumps"}')
+    print(root / 'plots' / f'inference_histories_seed{args.seed}.png')
+    print(root / 'plots' / f'inference_trajectories_seed{args.seed}.png')
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/analyze_latent.py
+================================================================================
+
+"""Dump a deterministic policy trajectory and visualize its encoder latents with UMAP."""
+import argparse
+import csv
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from src.env.fractal_env import FractalEnv
+from src.physics.dynamics import acceleration_components, velocity_frame
+from src.rl.policy import tensor_obs
+from src.rl.trainer import load_policy
+from src.terrain.pink_noise import generate
+from src.terrain.periodic_field import sample
+from src.analysis.inference import standard_inference_paths
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('checkpoint')
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--seed', type=int, default=100001, help='held-out terrain seed')
+    parser.add_argument('--steps', type=int, default=2000)
+    parser.add_argument('--output-dir', default=None)
+    args = parser.parse_args()
+    policy, cfg = load_policy(args.checkpoint, args.device)
+    policy.eval()
+    root = Path(args.output_dir or cfg['output']['dump_dir'])
+    latent_dir, plot_dir = root / 'latents', root / 'plots'
+    latent_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    terrain = generate(cfg['terrain'], seed=args.seed)
+    env = FractalEnv(cfg, terrain=terrain, seed=args.seed)
+    obs, _ = env.reset(seed=args.seed)
+    rows, latent_rows = [], []
+    for step in range(args.steps):
+        with torch.no_grad():
+            terrain_t, state_t = tensor_obs([obs], args.device)
+            latent = policy.encode(terrain_t, state_t)[0].cpu().numpy()
+            action, _, _, value = policy.act(terrain_t, state_t, deterministic=True)
+        control_acc, potential_acc, damping_acc, potential = acceleration_components(
+            env.body, action[0].cpu().numpy(), terrain, cfg['physics'])
+        forward, lateral = velocity_frame(env.body, cfg['physics'])
+        position = env.body.position.copy()
+        speed = float(np.linalg.norm(env.body.velocity))
+        obs, _, terminated, truncated, info = env.step(action[0].cpu().numpy())
+        # The latent, action, acceleration, and physical state are all sampled
+        # immediately before the same integration step.
+        rows.append({'step': step, 'x': position[0], 'y': position[1],
+                     'speed': speed, 'potential': potential,
+                     'action_forward': action[0, 0].item(), 'action_right': action[0, 1].item(),
+                     'value': value.item(),
+                     'control_acceleration': np.linalg.norm(control_acc),
+                     'potential_acceleration': np.linalg.norm(potential_acc),
+                     'damping_acceleration': np.linalg.norm(damping_acc),
+                     'net_acceleration': np.linalg.norm(control_acc + potential_acc + damping_acc),
+                     'input_parallel_acceleration': np.dot(control_acc, forward),
+                     'input_perpendicular_acceleration': np.dot(control_acc, lateral),
+                     'potential_parallel_acceleration': np.dot(potential_acc, forward),
+                     'potential_perpendicular_acceleration': np.dot(potential_acc, lateral)})
+        latent_rows.append(latent)
+        if terminated or truncated:
+            break
+    latents = np.asarray(latent_rows, dtype=np.float32)
+    latent_velocity = np.concatenate(([0.0], np.linalg.norm(np.diff(latents, axis=0), axis=1)))
+    for row, value in zip(rows, latent_velocity):
+        row['latent_velocity'] = float(value)
+    metadata_columns = ('step', 'x', 'y', 'speed', 'potential', 'action_forward', 'action_right', 'value',
+                        'latent_velocity',
+                        'control_acceleration', 'potential_acceleration', 'damping_acceleration', 'net_acceleration',
+                        'input_parallel_acceleration', 'input_perpendicular_acceleration',
+                        'potential_parallel_acceleration', 'potential_perpendicular_acceleration')
+    metadata = np.asarray([[r[k] for k in metadata_columns]
+                           for r in rows], dtype=np.float32)
+    paths = standard_inference_paths(root, args.checkpoint, args.seed)
+    stem = f'{Path(args.checkpoint).stem}_seed{args.seed}'
+    np.savez_compressed(paths['latent_npz'],
+                        latent=latents, metadata=metadata,
+                        metadata_columns=np.asarray(metadata_columns))
+    with paths['latent_csv'].open('w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]) + [f'latent_{i:03d}' for i in range(latents.shape[1])])
+        writer.writeheader()
+        for row, latent in zip(rows, latents):
+            writer.writerow(row | {f'latent_{i:03d}': value for i, value in enumerate(latent)})
+    try:
+        import umap
+    except ImportError as error:
+        raise RuntimeError('UMAP requires `umap-learn`; install project requirements first.') from error
+    normalized = (latents - latents.mean(axis=0)) / np.maximum(latents.std(axis=0), 1e-6)
+    embedding = umap.UMAP(n_neighbors=min(30, max(2, len(latents) - 1)), min_dist=0.1,
+                          metric='euclidean', random_state=cfg['training']['seed']).fit_transform(normalized)
+    umap_csv = paths['umap_csv']
+    np.savetxt(umap_csv, np.column_stack([metadata, embedding]), delimiter=',',
+               header=','.join(metadata_columns + ('umap_1', 'umap_2')), comments='')
+    positions = metadata[:, 1:3]
+    speed = metadata[:, 3]
+    time = metadata[:, 0]
+    values = {name: metadata[:, index] for index, name in enumerate(metadata_columns)}
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.6), constrained_layout=True)
+    pad = 8.0
+    x_min, x_max = positions[:, 0].min() - pad, positions[:, 0].max() + pad
+    y_min, y_max = positions[:, 1].min() - pad, positions[:, 1].max() + pad
+    grid_x = np.linspace(x_min, x_max, 180)
+    grid_y = np.linspace(y_min, y_max, 180)
+    mesh_x, mesh_y = np.meshgrid(grid_x, grid_y)
+    potential_grid = sample(terrain.potential, mesh_x, mesh_y, terrain.pixel_size)
+    contours = axes[0].contourf(mesh_x, mesh_y, potential_grid, levels=24, cmap='viridis_r')
+    axes[0].contour(mesh_x, mesh_y, potential_grid, levels=10, colors='white', linewidths=0.35, alpha=0.55)
+    axes[0].plot(positions[:, 0], positions[:, 1], color='#ef4444', linewidth=1.4,
+                 label='deterministic policy trajectory')
+    axes[0].scatter(positions[0, 0], positions[0, 1], color='white', edgecolor='#111827', s=32, zorder=3, label='start')
+    axes[0].set(title='Potential $\\phi=|I|^2$ and trajectory', xlabel='x', ylabel='y', aspect='equal')
+    axes[0].legend(loc='best', fontsize=8, frameon=True)
+    fig.colorbar(contours, ax=axes[0], label='potential $\\phi$')
+    # UMAP coordinate 1 and 2 are deliberately encoded as red and blue on the
+    # physical trajectory, making correspondence with the latent view visible.
+    umap_x = (embedding[:, 0] - embedding[:, 0].min()) / max(np.ptp(embedding[:, 0]), 1e-6)
+    umap_y = (embedding[:, 1] - embedding[:, 1].min()) / max(np.ptp(embedding[:, 1]), 1e-6)
+    axes[0].scatter(positions[:, 0], positions[:, 1], c=np.c_[umap_x, np.zeros_like(umap_x), umap_y],
+                    s=8, zorder=3, label='UMAP 1 = red, UMAP 2 = blue')
+    axes[0].legend(loc='best', fontsize=8, frameon=True)
+    latent_plot = axes[1].scatter(embedding[:, 0], embedding[:, 1], c=speed, s=12, cmap='magma')
+    axes[1].plot(embedding[:, 0], embedding[:, 1], color='#374151', linewidth=0.4, alpha=0.35)
+    axes[1].set(title='Encoder latent trajectory (UMAP)', xlabel='UMAP 1', ylabel='UMAP 2')
+    fig.colorbar(latent_plot, ax=axes[1], label='speed')
+    figure = paths['umap_plot']
+    fig.savefig(figure, dpi=180)
+    plt.close(fig)
+    fig, axes = plt.subplots(3, 1, figsize=(10, 7.4), sharex=True, constrained_layout=True)
+    axes[0].plot(time, values['action_forward'], label='forward command', color='#0f766e')
+    axes[0].plot(time, values['action_right'], label='right command', color='#ea580c')
+    axes[0].set(ylabel='normalized action', title='Deterministic steering commands')
+    axes[0].legend(ncol=2, frameon=False)
+    axes[0].grid(alpha=0.25)
+    axes[1].plot(time, values['input_parallel_acceleration'], label='input', color='#0f766e')
+    axes[1].plot(time, values['potential_parallel_acceleration'], label='potential', color='#7c3aed')
+    axes[1].axhline(0, color='#94a3b8', linewidth=0.7)
+    axes[1].set(ylabel='signed acceleration', title='Parallel acceleration (along velocity)')
+    axes[1].legend(ncol=2, frameon=False)
+    axes[1].grid(alpha=0.25)
+    axes[2].plot(time, values['input_perpendicular_acceleration'], label='input', color='#0f766e')
+    axes[2].plot(time, values['potential_perpendicular_acceleration'], label='potential', color='#7c3aed')
+    axes[2].axhline(0, color='#94a3b8', linewidth=0.7)
+    axes[2].set(xlabel='environment step', ylabel='signed acceleration',
+                title='Perpendicular acceleration (right of velocity)')
+    axes[2].legend(ncol=2, frameon=False)
+    axes[2].grid(alpha=0.25)
+    history = paths['acceleration_plot']
+    fig.savefig(history, dpi=180)
+    plt.close(fig)
+
+    # One complete episode diagnostic per dumped checkpoint.  Keep the smaller
+    # legacy views above, but make this self-contained panel the default report
+    # figure: map/UMAP correspondence, latent velocity, steering, and both
+    # signed acceleration projections all share one rollout time axis.
+    fig = plt.figure(figsize=(14, 15), constrained_layout=True)
+    grid = fig.add_gridspec(5, 2, height_ratios=(1.25, 0.72, 0.72, 0.72, 0.72))
+    map_axis = fig.add_subplot(grid[0, 0])
+    umap_axis = fig.add_subplot(grid[0, 1])
+    latent_axis = fig.add_subplot(grid[1, :])
+    steering_axis = fig.add_subplot(grid[2, :], sharex=latent_axis)
+    parallel_axis = fig.add_subplot(grid[3, :], sharex=latent_axis)
+    perpendicular_axis = fig.add_subplot(grid[4, :], sharex=latent_axis)
+    contours = map_axis.contourf(mesh_x, mesh_y, potential_grid, levels=24, cmap='viridis_r')
+    map_axis.contour(mesh_x, mesh_y, potential_grid, levels=10, colors='white', linewidths=0.35, alpha=0.55)
+    map_axis.plot(positions[:, 0], positions[:, 1], color='#374151', linewidth=0.65, alpha=0.65)
+    map_axis.scatter(positions[:, 0], positions[:, 1], c=np.c_[umap_x, np.zeros_like(umap_x), umap_y],
+                     s=8, zorder=3, label='UMAP 1 = red, UMAP 2 = blue')
+    map_axis.scatter(positions[0, 0], positions[0, 1], color='white', edgecolor='#111827', s=28, zorder=4, label='start')
+    map_axis.set(title='Potential map and physical trajectory', xlabel='x', ylabel='y', aspect='equal')
+    map_axis.legend(loc='best', fontsize=7, frameon=True)
+    fig.colorbar(contours, ax=map_axis, label='potential $\\phi$')
+    latent_plot = umap_axis.scatter(embedding[:, 0], embedding[:, 1], c=speed, s=12, cmap='magma')
+    umap_axis.plot(embedding[:, 0], embedding[:, 1], color='#374151', linewidth=0.4, alpha=0.35)
+    umap_axis.set(title='Encoder trajectory in UMAP', xlabel='UMAP 1', ylabel='UMAP 2')
+    fig.colorbar(latent_plot, ax=umap_axis, label='physical speed')
+    latent_axis.plot(time, values['latent_velocity'], color='#7c3aed')
+    latent_axis.set(title='Encoder latent velocity', ylabel=r'$||z_t-z_{t-1}||$')
+    steering_axis.plot(time, values['action_forward'], label='forward command', color='#0f766e')
+    steering_axis.plot(time, values['action_right'], label='right command', color='#ea580c')
+    steering_axis.set(title='Deterministic steering commands', ylabel='normalized action')
+    steering_axis.legend(ncol=2, frameon=False, loc='upper right')
+    parallel_axis.plot(time, values['input_parallel_acceleration'], label='input', color='#0f766e')
+    parallel_axis.plot(time, values['potential_parallel_acceleration'], label='potential', color='#7c3aed')
+    parallel_axis.axhline(0, color='#94a3b8', linewidth=0.7)
+    parallel_axis.set(title='Parallel acceleration (along velocity)', ylabel='signed acceleration')
+    parallel_axis.legend(ncol=2, frameon=False, loc='upper right')
+    perpendicular_axis.plot(time, values['input_perpendicular_acceleration'], label='input', color='#0f766e')
+    perpendicular_axis.plot(time, values['potential_perpendicular_acceleration'], label='potential', color='#7c3aed')
+    perpendicular_axis.axhline(0, color='#94a3b8', linewidth=0.7)
+    perpendicular_axis.set(title='Perpendicular acceleration (right of velocity)', xlabel='environment step',
+                           ylabel='signed acceleration')
+    perpendicular_axis.legend(ncol=2, frameon=False, loc='upper right')
+    for axis in (latent_axis, steering_axis, parallel_axis, perpendicular_axis):
+        axis.grid(alpha=0.25)
+    episode = paths['episode_plot']
+    fig.savefig(episode, dpi=180)
+    plt.close(fig)
+    print(figure)
+    print(history)
+    print(episode)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/compare_checkpoint_umaps.py
+================================================================================
+
+"""Build a pairwise UMAP matrix for deterministic inference encoder states.
+
+Each ordered pair of checkpoints is embedded jointly, preserving the question
+"where does this checkpoint's inference occupy latent space relative to that
+counterpart?"  The full N x N embeddings are saved in an NPZ; an evenly
+spaced 5 x 5 subset is rendered for readable inspection.
+"""
+import argparse
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from src.env.fractal_env import FractalEnv
+from src.rl.policy import tensor_obs
+from src.rl.trainer import load_policy
+from src.terrain.pink_noise import generate
+
+
+def checkpoint_step(path: Path) -> int:
+    return int(path.stem.rsplit('_', 1)[-1])
+
+
+def checkpoints_from_glob(pattern: str, limit: int) -> list[Path]:
+    paths = sorted(Path().glob(pattern), key=checkpoint_step)
+    if not paths:
+        raise FileNotFoundError(f'No checkpoints match {pattern!r}')
+    if len(paths) <= limit:
+        return paths
+    indices = np.unique(np.linspace(0, len(paths) - 1, limit, dtype=int))
+    return [paths[index] for index in indices]
+
+
+def probe_observations(checkpoint: Path, device: str, seed: int, steps: int) -> tuple[dict, list[dict]]:
+    """Collect one held-out deterministic trajectory to use as a shared probe."""
+    policy, cfg = load_policy(checkpoint, device)
+    policy.eval()
+    terrain = generate(cfg['terrain'], seed=seed)
+    env = FractalEnv(cfg, terrain=terrain, seed=seed)
+    observation, _ = env.reset(seed=seed)
+    observations = []
+    for _ in range(steps):
+        with torch.no_grad():
+            terrain_t, state_t = tensor_obs([observation], device)
+            action, _, _, _ = policy.act(terrain_t, state_t, deterministic=True)
+        observations.append(observation)
+        observation, _, terminated, truncated, _ = env.step(action[0].cpu().numpy())
+        if terminated or truncated:
+            break
+    return cfg, observations
+
+
+def encode_observations(checkpoint: Path, device: str, observations: list[dict]) -> np.ndarray:
+    """Encode the same probe observations with one checkpoint's encoder."""
+    policy, _ = load_policy(checkpoint, device)
+    policy.eval()
+    values = []
+    with torch.no_grad():
+        for observation in observations:
+            terrain_t, state_t = tensor_obs([observation], device)
+            values.append(policy.encode(terrain_t, state_t)[0].cpu().numpy())
+    return np.asarray(values, dtype=np.float32)
+
+
+def joint_umap(first: np.ndarray, second: np.ndarray, seed: int) -> np.ndarray:
+    try:
+        import umap
+    except ImportError as error:
+        raise RuntimeError('UMAP requires `umap-learn`; install project requirements first.') from error
+    joined = np.concatenate((first, second), axis=0)
+    joined = (joined - joined.mean(axis=0)) / np.maximum(joined.std(axis=0), 1e-6)
+    neighbors = min(30, max(2, len(joined) - 1))
+    return umap.UMAP(n_neighbors=neighbors, min_dist=0.1, metric='euclidean',
+                     random_state=seed).fit_transform(joined).astype(np.float32)
+
+
+def plot_subset(matrix: np.ndarray, checkpoints: list[Path], subset: np.ndarray, points: int, destination: Path) -> None:
+    count = len(subset)
+    figure, axes = plt.subplots(count, count, figsize=(3.0 * count, 3.0 * count), squeeze=False,
+                                constrained_layout=True)
+    for row, first_index in enumerate(subset):
+        for column, second_index in enumerate(subset):
+            axis = axes[row, column]
+            embedding = matrix[first_index, second_index, :2 * points]
+            if first_index == second_index:
+                axis.scatter(embedding[:points, 0], embedding[:points, 1], s=3, color='#2563eb', alpha=0.68)
+            else:
+                axis.scatter(embedding[:points, 0], embedding[:points, 1], s=3, color='#2563eb', alpha=0.55)
+                axis.scatter(embedding[points:, 0], embedding[points:, 1], s=3, color='#f97316', alpha=0.55)
+            axis.set(xticks=[], yticks=[])
+            if row == 0:
+                axis.set_title(f'counterpart\n{checkpoint_step(checkpoints[second_index]):,}', fontsize=8)
+            if column == 0:
+                axis.set_ylabel(f'row\n{checkpoint_step(checkpoints[first_index]):,}', fontsize=8)
+    figure.suptitle('Pairwise joint UMAPs on the same held-out inference trajectory', fontsize=14)
+    figure.text(0.5, 0.008, 'blue = row encoder, orange = counterpart encoder; diagonal = self comparison',
+                ha='center', fontsize=9, color='#374151')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(destination, dpi=180)
+    plt.close(figure)
+
+
+def linear_cka(first: np.ndarray, second: np.ndarray) -> float:
+    """Centered linear CKA: 1 means equivalent representational geometry."""
+    first = first - first.mean(axis=0, keepdims=True)
+    second = second - second.mean(axis=0, keepdims=True)
+    cross = np.linalg.norm(first.T @ second, ord='fro') ** 2
+    scale = np.linalg.norm(first.T @ first, ord='fro') * np.linalg.norm(second.T @ second, ord='fro')
+    return float(cross / max(scale, 1e-12))
+
+
+def cka_plot(matrix: np.ndarray, checkpoints: list[Path], destination: Path) -> None:
+    figure, axis = plt.subplots(figsize=(7.2, 6.2), constrained_layout=True)
+    image = axis.imshow(matrix, vmin=0, vmax=1, cmap='magma')
+    labels = [f'{checkpoint_step(path) / 1_000_000:g}M' for path in checkpoints]
+    axis.set(xticks=range(len(labels)), yticks=range(len(labels)), xticklabels=labels, yticklabels=labels,
+             xlabel='counterpart encoder checkpoint', ylabel='row encoder checkpoint',
+             title='Encoder similarity on shared held-out inference (linear CKA)')
+    axis.tick_params(axis='x', rotation=45)
+    for row in range(len(labels)):
+        for column in range(len(labels)):
+            axis.text(column, row, f'{matrix[row, column]:.2f}', ha='center', va='center', fontsize=6,
+                      color='white' if matrix[row, column] < 0.55 else '#111827')
+    figure.colorbar(image, ax=axis, label='linear CKA (1 = same geometry)')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(destination, dpi=180)
+    plt.close(figure)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('checkpoints', help='Glob such as dumps/strong_field/checkpoints/ppo_*.pt')
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--seed', type=int, default=100001)
+    parser.add_argument('--steps', type=int, default=1000)
+    parser.add_argument('--limit', type=int, default=10)
+    parser.add_argument('--plot-size', type=int, default=5)
+    parser.add_argument('--output-dir', default=None)
+    args = parser.parse_args()
+    if min(args.steps, args.limit, args.plot_size) < 1:
+        parser.error('--steps, --limit, and --plot-size must be positive')
+    checkpoints = checkpoints_from_glob(args.checkpoints, args.limit)
+    # The latest policy supplies the held-out inference trajectory.  All
+    # encoders then see precisely the same observations, avoiding a policy
+    # behavior confound in the representation comparison.
+    cfg, observations = probe_observations(checkpoints[-1], args.device, args.seed, args.steps)
+    latents = np.asarray([encode_observations(checkpoint, args.device, observations)
+                          for checkpoint in checkpoints], dtype=np.float32)
+    points = len(observations)
+    root = Path(args.output_dir or cfg['output']['dump_dir'])
+    root.mkdir(parents=True, exist_ok=True)
+    matrix = np.empty((len(checkpoints), len(checkpoints), 2 * points, 2), dtype=np.float32)
+    for first in range(len(checkpoints)):
+        for second in range(len(checkpoints)):
+            matrix[first, second] = joint_umap(latents[first], latents[second], cfg['training']['seed'])
+            print(f'UMAP pair {first + 1}/{len(checkpoints)} x {second + 1}/{len(checkpoints)}', flush=True)
+    matrix_dir = root / 'umap_matrix'
+    matrix_dir.mkdir(parents=True, exist_ok=True)
+    cka = np.asarray([[linear_cka(latents[first], latents[second]) for second in range(len(checkpoints))]
+                      for first in range(len(checkpoints))], dtype=np.float32)
+    np.savez_compressed(matrix_dir / f'pairwise_encoder_umap_seed{args.seed}.npz',
+                        embeddings=matrix, latents=latents,
+                        checkpoint_steps=np.asarray([checkpoint_step(path) for path in checkpoints]),
+                        cka=cka, seed=args.seed)
+    subset_count = min(args.plot_size, len(checkpoints))
+    subset = np.unique(np.linspace(0, len(checkpoints) - 1, subset_count, dtype=int))
+    destination = root / 'plots' / f'pairwise_encoder_umap_{len(subset)}x{len(subset)}_seed{args.seed}.png'
+    plot_subset(matrix, checkpoints, subset, points, destination)
+    cka_destination = root / 'plots' / f'encoder_cka_matrix_seed{args.seed}.png'
+    cka_plot(cka, checkpoints, cka_destination)
+    print(matrix_dir / f'pairwise_encoder_umap_seed{args.seed}.npz')
+    print(destination)
+    print(cka_destination)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/evaluate.py
+================================================================================
+
+import argparse
+import json
+from pathlib import Path
+from src.rl.trainer import load_policy, evaluate
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('checkpoint')
+    p.add_argument('--device', default='cpu')
+    p.add_argument('--episodes-per-seed', type=int, default=1)
+    a = p.parse_args()
+    policy, cfg = load_policy(a.checkpoint, a.device)
+    mean, std = evaluate(policy, cfg, a.device, a.episodes_per_seed)
+    result = {'mean_speed': mean, 'std_speed': std, 'episodes_per_seed': a.episodes_per_seed}
+    dest = Path(cfg['output']['dump_dir']) / 'metrics' / 'evaluation.json'
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(result, indent=2))
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/generate_terrain.py
+================================================================================
+
+import argparse
+from pathlib import Path
+import numpy as np
+from PIL import Image
+from src.utils.config import load_config
+from src.terrain.pink_noise import generate
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--config')
+    p.add_argument('--seed', type=int)
+    a = p.parse_args()
+    cfg = load_config(a.config)
+    terrain = generate(cfg['terrain'], a.seed)
+    dest = Path(cfg['output']['dump_dir']) / 'terrains'
+    dest.mkdir(parents=True, exist_ok=True)
+    seed = cfg['terrain']['seed'] if a.seed is None else a.seed
+    np.savez_compressed(dest / f'terrain_{seed}.npz', intensity=terrain.intensity, potential=terrain.potential,
+                        gradient_x=terrain.gradient_x, gradient_y=terrain.gradient_y,
+                        gradient_reference=terrain.gradient_reference)
+    normalized = terrain.potential / max(1e-8, float(terrain.potential.max()))
+    Image.fromarray(np.uint8(np.clip(normalized, 0, 1) * 255)).save(dest / f'terrain_{seed}_potential.png')
+    print(dest / f'terrain_{seed}.npz')
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/make_movie.py
+================================================================================
+
+import argparse
+from pathlib import Path
+import numpy as np
+import torch
+from src.rl.trainer import load_policy
+from src.rl.policy import tensor_obs
+from src.terrain.pink_noise import generate
+from src.env.fractal_env import FractalEnv
+from src.visualization.renderer import frame
+from src.visualization.video import save_video
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('checkpoint')
+    p.add_argument('--seed', type=int, default=100001)
+    p.add_argument('--steps', type=int, default=1000)
+    p.add_argument('--every', type=int, default=3)
+    p.add_argument('--format', choices=['mp4', 'gif'], default='mp4')
+    p.add_argument('--device', default='cpu')
+    a = p.parse_args()
+    if a.every < 1:
+        p.error('--every must be positive')
+    policy, cfg = load_policy(a.checkpoint, a.device)
+    env = FractalEnv(cfg, generate(cfg['terrain'], a.seed), a.seed)
+    obs, _ = env.reset(seed=a.seed)
+    trail, images, trajectory = [], [], []
+    for step in range(a.steps):
+        with torch.no_grad():
+            terrain, state = tensor_obs([obs], a.device)
+            action, _, _, _ = policy.act(terrain, state, deterministic=True)
+        act = action[0].cpu().numpy()
+        obs, _, term, trunc, info = env.step(act)
+        trail.append(env.body.position.copy())
+        trajectory.append([step, *env.body.position, *env.body.velocity, info['speed'], info['potential'], *act])
+        if step % a.every == 0:
+            images.append(frame(env, trail))
+        if term or trunc:
+            break
+    dest = Path(cfg['output']['movie_dir']) / f'trajectory_seed_{a.seed}.{a.format}'
+    save_video(images, dest, cfg['output']['fps'])
+    path = Path(cfg['output']['dump_dir']) / 'trajectories' / f'trajectory_seed_{a.seed}.csv'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savetxt(path, trajectory, delimiter=',', comments='',
+               header='step,x,y,vx,vy,speed,potential,throttle,steering')
+    print(dest)
+    print(path)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/plot_episode_diagnostics.py
+================================================================================
+
+"""Make x(t), y(t), latent-speed and map-trajectory plots for inference episodes."""
+import argparse
+from pathlib import Path
+import matplotlib; matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from src.env.fractal_env import FractalEnv
+from src.rl.policy import tensor_obs
+from src.rl.trainer import load_policy
+from src.terrain.pink_noise import generate
+from src.terrain.periodic_field import sample
+
+def step(path): return int(path.stem.rsplit('_', 1)[-1])
+def main():
+ p=argparse.ArgumentParser(); p.add_argument('checkpoints'); p.add_argument('--device',default='cpu'); p.add_argument('--seed',type=int,default=100001); p.add_argument('--steps',type=int,default=2000); p.add_argument('--output-dir',default=None); a=p.parse_args()
+ for ckpt in sorted(Path().glob(a.checkpoints),key=step):
+  policy,cfg=load_policy(ckpt,a.device); policy.eval(); terrain=generate(cfg['terrain'],a.seed); env=FractalEnv(cfg,terrain,a.seed); obs,_=env.reset(seed=a.seed); xy=[]; z=[]
+  for _ in range(a.steps):
+   with torch.no_grad():
+    ti,si=tensor_obs([obs],a.device); z.append(policy.encode(ti,si)[0].cpu().numpy()); act,_,_,_=policy.act(ti,si,deterministic=True)
+   obs,_,term,trunc,_=env.step(act[0].cpu().numpy()); xy.append(env.body.position.copy())
+   if term or trunc: break
+  xy=np.asarray(xy); z=np.asarray(z); ls=np.r_[0.,np.linalg.norm(np.diff(z,axis=0),axis=1)]; t=np.arange(len(xy)); root=Path(a.output_dir or cfg['output']['dump_dir']); out=root/'plots'; out.mkdir(parents=True,exist_ok=True)
+  fig,ax=plt.subplots(2,2,figsize=(10,7),constrained_layout=True); ax[0,0].plot(t,xy[:,0]); ax[0,0].set(title='x(t)',xlabel='step',ylabel='x'); ax[0,1].plot(t,xy[:,1]); ax[0,1].set(title='y(t)',xlabel='step',ylabel='y'); ax[1,0].plot(t,ls,color='#7c3aed'); ax[1,0].set(title='Encoder latent speed',xlabel='step',ylabel=r'$||z_t-z_{t-1}||$')
+  pad=12.; gx=np.linspace(xy[:,0].min()-pad,xy[:,0].max()+pad,150); gy=np.linspace(xy[:,1].min()-pad,xy[:,1].max()+pad,150); mx,my=np.meshgrid(gx,gy); ax[1,1].contourf(mx,my,sample(terrain.potential,mx,my,terrain.pixel_size),levels=24,cmap='viridis_r'); ax[1,1].plot(xy[:,0],xy[:,1],color='#ef4444'); ax[1,1].scatter(*xy[0],color='white',edgecolor='#111827',s=24); ax[1,1].set(title='x-y trajectory on potential map',aspect='equal',xticks=[],yticks=[])
+  for aa in ax.flat: aa.grid(alpha=.2) if aa is not ax[1,1] else None
+  dest=out/f'episode_diagnostics_{ckpt.stem}_seed{a.seed}.png'; fig.savefig(dest,dpi=180); plt.close(fig); print(dest)
+if __name__=='__main__': main()
+
+
+================================================================================
+FILE: driver/plot_latent_speed.py
+================================================================================
+
+"""Relate a checkpoint's encoder trajectory to physical speed during inference."""
+import argparse
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from src.env.fractal_env import FractalEnv
+from src.rl.policy import tensor_obs
+from src.rl.trainer import load_policy
+from src.terrain.pink_noise import generate
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('checkpoint')
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--seed', type=int, default=100001)
+    parser.add_argument('--steps', type=int, default=2000)
+    parser.add_argument('--output-dir', default=None)
+    args = parser.parse_args()
+    try:
+        import umap
+    except ImportError as error:
+        raise RuntimeError('UMAP requires `umap-learn`.') from error
+    policy, cfg = load_policy(args.checkpoint, args.device)
+    policy.eval()
+    terrain = generate(cfg['terrain'], seed=args.seed)
+    env = FractalEnv(cfg, terrain=terrain, seed=args.seed)
+    observation, _ = env.reset(seed=args.seed)
+    latents, speeds = [], []
+    for _ in range(args.steps):
+        with torch.no_grad():
+            terrain_t, state_t = tensor_obs([observation], args.device)
+            latents.append(policy.encode(terrain_t, state_t)[0].cpu().numpy())
+            action, _, _, _ = policy.act(terrain_t, state_t, deterministic=True)
+        observation, _, terminated, truncated, info = env.step(action[0].cpu().numpy())
+        speeds.append(info['speed'])
+        if terminated or truncated:
+            break
+    latents, speeds = np.asarray(latents, dtype=np.float32), np.asarray(speeds, dtype=np.float32)
+    normalized = (latents - latents.mean(axis=0)) / np.maximum(latents.std(axis=0), 1e-6)
+    embedding = umap.UMAP(n_neighbors=min(30, len(latents) - 1), min_dist=0.1, metric='euclidean',
+                          random_state=cfg['training']['seed']).fit_transform(normalized)
+    latent_velocity = np.r_[0.0, np.linalg.norm(np.diff(latents, axis=0), axis=1)]
+    nearest_one = np.argsort(np.abs(speeds - 1.0))[:max(1, len(speeds) // 40)]
+    nearest_two = np.argsort(np.abs(speeds - 2.0))[:max(1, len(speeds) // 40)]
+    root = Path(args.output_dir or cfg['output']['dump_dir'])
+    dump_dir, plot_dir = root / 'inference_dumps', root / 'plots'
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(dump_dir / f'latent_speed_{Path(args.checkpoint).stem}_seed{args.seed}.npz',
+                        latent=latents, umap=embedding, speed=speeds, latent_velocity=latent_velocity)
+    figure, axes = plt.subplots(1, 2, figsize=(12, 4.8), constrained_layout=True)
+    axes[0].plot(embedding[:, 0], embedding[:, 1], color='#64748b', alpha=.45, linewidth=.65)
+    scatter = axes[0].scatter(embedding[:, 0], embedding[:, 1], c=speeds, cmap='viridis', s=10, alpha=.8)
+    axes[0].scatter(embedding[nearest_one, 0], embedding[nearest_one, 1], color='#2563eb', s=26,
+                    label='speed ≈ 1', edgecolor='white', linewidth=.35)
+    axes[0].scatter(embedding[nearest_two, 0], embedding[nearest_two, 1], color='#f97316', s=26,
+                    label='speed ≈ 2', edgecolor='white', linewidth=.35)
+    axes[0].set(title='Encoder trajectory in UMAP space', xlabel='UMAP 1', ylabel='UMAP 2')
+    axes[0].legend(frameon=False)
+    figure.colorbar(scatter, ax=axes[0], label='physical speed')
+    time = np.arange(len(speeds))
+    axes[1].plot(time, speeds, color='#0f766e', label='physical speed')
+    twin = axes[1].twinx()
+    twin.plot(time, latent_velocity, color='#7c3aed', alpha=.8, label='latent speed')
+    axes[1].scatter(nearest_one, speeds[nearest_one], color='#2563eb', s=18, zorder=3)
+    axes[1].scatter(nearest_two, speeds[nearest_two], color='#f97316', s=18, zorder=3)
+    axes[1].set(title='Physical and latent speed along inference', xlabel='environment step', ylabel='physical speed')
+    twin.set_ylabel(r'latent speed ($||z_t-z_{t-1}||$)')
+    axes[1].grid(alpha=.25)
+    axes[1].legend(loc='upper left', frameon=False)
+    twin.legend(loc='upper right', frameon=False)
+    destination = plot_dir / f'latent_speed_{Path(args.checkpoint).stem}_seed{args.seed}.png'
+    figure.savefig(destination, dpi=180)
+    print(destination)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/plot_latent_speed_matrix.py
+================================================================================
+
+"""Plot pairwise UMAP-space latent speeds from a saved encoder UMAP matrix."""
+import argparse
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def smooth(values: np.ndarray, width: int = 25) -> np.ndarray:
+    kernel = np.full(width, 1.0 / width)
+    return np.convolve(values, kernel, mode='same')
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('matrix', help='pairwise_encoder_umap_*.npz')
+    parser.add_argument('--plot-size', type=int, default=5)
+    parser.add_argument('--output', default=None)
+    args = parser.parse_args()
+    data = np.load(args.matrix)
+    embeddings, steps = data['embeddings'], data['checkpoint_steps']
+    count, _, total_points, _ = embeddings.shape
+    points = total_points // 2
+    selected = np.unique(np.linspace(0, count - 1, min(args.plot_size, count), dtype=int))
+    figure, axes = plt.subplots(len(selected), len(selected), figsize=(3.0 * len(selected), 2.15 * len(selected)),
+                                squeeze=False, sharex=True, sharey=True, constrained_layout=True)
+    for row, first in enumerate(selected):
+        for column, second in enumerate(selected):
+            axis = axes[row, column]
+            pair = embeddings[first, second]
+            first_speed = smooth(np.r_[0.0, np.linalg.norm(np.diff(pair[:points], axis=0), axis=1)])
+            second_speed = smooth(np.r_[0.0, np.linalg.norm(np.diff(pair[points:], axis=0), axis=1)])
+            axis.plot(first_speed, color='#2563eb', linewidth=.9)
+            if first != second:
+                axis.plot(second_speed, color='#f97316', linewidth=.9)
+            axis.grid(alpha=.2)
+            if row == 0:
+                axis.set_title(f'counterpart\n{steps[second] / 1_000_000:g}M', fontsize=8)
+            if column == 0:
+                axis.set_ylabel(f'row\n{steps[first] / 1_000_000:g}M', fontsize=8)
+            if row == len(selected) - 1:
+                axis.set_xlabel('inference step', fontsize=7)
+    figure.suptitle('Pairwise latent-speed matrix in joint UMAP space', fontsize=14)
+    figure.text(.5, .008, 'blue = row encoder UMAP speed; orange = counterpart UMAP speed; both use the same inference states',
+                ha='center', fontsize=9, color='#374151')
+    source = Path(args.matrix)
+    destination = Path(args.output) if args.output else source.parent.parent / 'plots' / 'pairwise_latent_speed_5x5.png'
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(destination, dpi=180)
+    print(destination)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/plot_power_limit.py
+================================================================================
+
+"""Plot the centered Gaussian potential and longitudinal power throttle."""
+import argparse
+from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+from src.terrain.pink_noise import generate
+from src.utils.config import load_config
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--overlay', action='append', default=[])
+    parser.add_argument('--seed', type=int, default=None)
+    parser.add_argument('--power-limit', type=float, default=None)
+    parser.add_argument('--output', default=None)
+    args = parser.parse_args()
+    cfg = load_config(overlays=args.overlay)
+    terrain = generate(cfg['terrain'], args.seed)
+    power = args.power_limit if args.power_limit is not None else cfg['physics']['power_limit']
+    if power is None:
+        parser.error('set physics.power_limit or pass --power-limit')
+    speeds = np.linspace(0, 8, 400)
+    acceleration = np.minimum(float(cfg['physics']['max_forward_acceleration']),
+                              float(power) / (float(cfg['physics']['mass']) * np.maximum(
+                                  speeds, float(cfg['physics']['power_speed_epsilon']))))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), constrained_layout=True)
+    image = axes[0].imshow(terrain.potential, cmap='magma', origin='lower')
+    axes[0].set(title=r'Periodic potential $\phi=(I-\bar I)^2$', xlabel='tile x', ylabel='tile y')
+    fig.colorbar(image, ax=axes[0], label='potential')
+    axes[1].plot(speeds, acceleration, color='#0f766e', linewidth=2,
+                 label=r'$|a_\parallel|\leq\min(a_{max},P/(m\max(v,\epsilon)))$')
+    axes[1].axvline(float(power) / (float(cfg['physics']['mass']) * float(cfg['physics']['max_forward_acceleration'])),
+                    color='#64748b', linestyle='--', linewidth=1, label='throttle onset')
+    axes[1].set(xlabel='speed', ylabel='maximum |parallel acceleration|', ylim=(0, None),
+                title=f'Power-limited longitudinal control (P={power:g})')
+    axes[1].legend(fontsize=8)
+    destination = Path(args.output) if args.output else Path(cfg['output']['dump_dir']) / 'plots' / 'power_limited_mode.png'
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(destination, dpi=180)
+    print(destination)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/plot_training.py
+================================================================================
+
+"""Plot rollout and held-out evaluation speed from a PPO training CSV."""
+import argparse
+import csv
+from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--metrics', default='dumps/metrics/training.csv')
+    parser.add_argument('--output', default='dumps/plots/learning_curve.png')
+    args = parser.parse_args()
+    rows = list(csv.DictReader(Path(args.metrics).open()))
+    if not rows:
+        raise ValueError(f'no rows in {args.metrics}')
+    steps = np.asarray([float(row['steps']) for row in rows])
+    rollout = np.asarray([float(row['rollout_mean_speed']) for row in rows])
+    evaluation = np.asarray([float(row['evaluation_mean_speed']) for row in rows])
+    eval_std = np.asarray([float(row['evaluation_std_speed']) for row in rows])
+    valid = np.isfinite(evaluation)
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
+    ax.plot(steps, rollout, color='#9aa5b1', linewidth=0.9, alpha=0.8, label='rollout mean speed')
+    ax.plot(steps[valid], evaluation[valid], 'o-', color='#0f766e', markersize=3,
+            linewidth=1.7, label='held-out mean speed')
+    ax.fill_between(steps[valid], evaluation[valid] - eval_std[valid],
+                    evaluation[valid] + eval_std[valid], color='#0f766e', alpha=0.16,
+                    label='held-out standard deviation')
+    ax.set(xlabel='training transitions', ylabel='mean speed', title='PPO learning curve')
+    ax.grid(alpha=0.22)
+    ax.legend(frameon=False)
+    fig.savefig(out, dpi=180)
+    print(out)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: driver/train.py
+================================================================================
+
+"""Run from project root: python -m driver.train --set training.total_timesteps=10000"""
+import argparse
+from src.utils.config import load_config
+from src.rl.trainer import train
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', default=None)
+    parser.add_argument('--overlay', action='append', default=[])
+    parser.add_argument('--set', dest='overrides', action='append', default=[])
+    parser.add_argument('--device', default='cpu')
+    args = parser.parse_args()
+    train(load_config(args.config, args.overlay, args.overrides), device=args.device)
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================================================
+FILE: generate_summary.py
+================================================================================
+
+import pathlib
+
+
+ROOT = pathlib.Path(__file__).resolve().parent
+OUTPUT_FILENAME = "summary.txt"
+
+
+def _is_python_file(path: pathlib.Path) -> bool:
+    return path.suffix == ".py" and "__pycache__" not in path.parts
+
+
+def _has_main_signature(path: pathlib.Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return ('if __name__ == "__main__"' in text) or ("def main(" in text)
+
+
+def _iter_project_python_files():
+    for path in ROOT.rglob("*.py"):
+        if _is_python_file(path):
+            yield path
+
+
+def _collect_files():
+    src_root = ROOT / "src"
+    src_files = sorted(
+        [p for p in src_root.rglob("*.py") if _is_python_file(p)]
+    ) if src_root.exists() else []
+
+    main_files = sorted(
+        [p for p in _iter_project_python_files() if _has_main_signature(p)]
+    )
+
+    selected = []
+    seen = set()
+    for path in src_files + main_files:
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(path)
+    return src_files, main_files, selected
+
+
+def generate_summary():
+    src_files, main_files, selected_files = _collect_files()
+    out_path = ROOT / OUTPUT_FILENAME
+
+    with out_path.open("w", encoding="utf-8") as outfile:
+        outfile.write("Python Source Summary\n")
+        outfile.write("=====================\n\n")
+        outfile.write(f"Project root: {ROOT}\n")
+        outfile.write(f"Included src files: {len(src_files)}\n")
+        outfile.write(f"Detected main/entry files: {len(main_files)}\n")
+        outfile.write(f"Total unique files included: {len(selected_files)}\n\n")
+
+        for file_path in selected_files:
+            rel_path = file_path.relative_to(ROOT)
+            outfile.write(f"{'=' * 80}\n")
+            outfile.write(f"FILE: {rel_path}\n")
+            outfile.write(f"{'=' * 80}\n\n")
+            try:
+                outfile.write(file_path.read_text(encoding="utf-8"))
+            except Exception as exc:  # pragma: no cover
+                outfile.write(f"ERROR READING FILE: {exc}\n")
+            outfile.write("\n\n")
+
+    print(f"Success! Wrote {len(selected_files)} files to '{out_path}'.")
+
+
+if __name__ == "__main__":
+    generate_summary()
+
+

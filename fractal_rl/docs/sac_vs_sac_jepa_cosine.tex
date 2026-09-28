@@ -1,0 +1,224 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.9in]{geometry}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage[hidelinks]{hyperref}
+\newcommand{\code}[1]{\texttt{#1}}
+\captionsetup{font=small,skip=4pt}
+
+\title{SAC vs SAC+JEPA with a cosine-normalized one-step objective\\[2pt]
+\large A 10{,}000-transition RTX~3090 comparison}
+\author{}
+\date{September 20, 2026}
+
+\begin{document}
+\maketitle
+
+\noindent
+\textbf{Summary.} Normalizing the predictive loss to a scale-free cosine
+distance fixes the loss-scale defect of the earlier MSE branch and yields an
+auxiliary objective that is demonstrably learning: at 10k transitions the
+predictor reaches $0.0038$ against a shuffled-action loss of $0.0099$ and a
+no-model identity baseline of $0.1253$. Performance, however, remains below
+vanilla SAC --- $1.188$ versus $1.655$ --- in this single-seed, 10k-transition
+comparison.
+
+\section{Shared setup}
+
+All three arms use identical terrain (standardized centered-Gaussian,
+periodic tiling, random start positions), the $P_{\max}=6$ longitudinal power
+cap, 16 parallel environments, the same replay configuration
+($20{,}000$ capacity, batch $128$, $1{,}000$ learning-start transitions, one
+update per transition), the learned entropy temperature, the same evaluation
+interval of $2{,}048$ transitions, and held-out terrain seeds
+$100001$--$100004$. Only the actor objective differs. Each arm is a single
+training seed; the reported $\pm$ are standard deviations across the four
+held-out terrain seeds, not across runs.
+
+\section{Full objective}
+
+The actor minimizes
+\begin{equation}
+ \mathcal L_{\rm total}
+ =\underbrace{\mathbb E_{o\sim\mathcal D}\big[\alpha\log\pi_\theta(a|o)-\min(Q_1,Q_2)(o,a)\big]}_{\text{SAC actor loss}}
+ +\lambda_{\rm JEPA}\,\mathcal L_{\rm JEPA}
+ +c_{\rm var}\,\mathcal L_{\rm var},
+ \qquad a\sim\pi_\theta(\cdot|o),
+\end{equation}
+with the scale-free predictive term
+\begin{equation}
+ \mathcal L_{\rm JEPA}
+ =1-\cos\!\Big(q_\psi\big(\big[f_\theta(o_t),\,a_t\big]\big),\;
+ \operatorname{sg}\big[\bar f(o_{t+1})\big]\Big),
+\end{equation}
+and the VICReg-style variance floor
+\begin{equation}
+ \mathcal L_{\rm var}
+ =\frac{1}{d}\sum_{j=1}^{d}\operatorname{relu}\!\Big(c_{\rm var}^{\rm tgt}
+ -\sqrt{\operatorname{Var}_{b}\big[f_\theta(o_t)\big]_j+\epsilon}\Big),
+ \qquad \epsilon=10^{-4}.
+\end{equation}
+
+\noindent
+Here $f_\theta$ is the online actor encoder, $q_\psi$ a $130\!\to\!128$ predictor
+consuming the current embedding and the executed action, $\bar f$ a
+stop-gradient EMA copy of $f_\theta$, and $\operatorname{sg}$ the stop-gradient.
+SAC's target \emph{critics} use $\tau=0.005$; this EMA target is separate and
+updates once per $64$ collected transitions with $\tau=0.01$. Replay supplies
+the executed tanh-squashed action and the true pre-reset next observation.
+Because $\cos$ discards magnitude, $\mathcal L_{\rm var}$ is what prevents
+collapse; the two terms are complementary, not alternatives. Substituting MSE
+for the cosine gives the ``corrected MSE'' arm.
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Setting} & \textbf{SAC} & \textbf{SAC+JEPA (MSE+var)} & \textbf{SAC+JEPA (cosine)} \\
+\midrule
+$\lambda_{\rm JEPA}$ & $0$ & $0.025$ & $0.025$ \\
+predictive loss & --- & MSE on embeddings & $1-\cos$ \\
+$c_{\rm var}$ / target & --- & $0.01$ / $0.1$ & $0.01$ / $0.1$ \\
+EMA cadence & --- & per $64$ transitions & per $64$ transitions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Results}
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Transitions} & \textbf{SAC} & \textbf{SAC+JEPA (MSE+var)} & \textbf{SAC+JEPA (cosine)} \\
+\midrule
+2{,}048  & $0.064\pm0.031$ & $0.065\pm0.030$ & $0.064\pm0.029$ \\
+4{,}096  & $0.190\pm0.027$ & $0.174\pm0.028$ & $0.275\pm0.035$ \\
+6{,}144  & $0.292\pm0.042$ & $0.286\pm0.036$ & $0.269\pm0.027$ \\
+8{,}192  & $0.673\pm0.041$ & $0.701\pm0.033$ & $0.651\pm0.030$ \\
+10{,}000 & $\mathbf{1.655\pm0.056}$ & $\mathbf{1.403\pm0.020}$ & $\mathbf{1.188\pm0.042}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The endpoints are ordered monotonically in the influence of the auxiliary term:
+no JEPA ($1.655$) $>$ MSE JEPA ($1.403$, $-15.2\%$) $>$ cosine JEPA
+($1.188$, $-28.2\%$). All three arms share an effectively identical entropy
+trajectory ($\alpha$: $0.1457,\,0.0788,\,0.0426,\,0.0231,\,0.0135$) and
+near-identical critic loss, so the divergence is late and confined to the
+policy representation.
+
+\section{The objective is learning, not collapsing}
+
+The cosine arm logs three quantities per checkpoint that separate a working
+predictor from a degenerate one: the actual loss, the loss with actions
+permuted across the batch, and the no-model identity baseline
+$1-\cos(z_t,z_{t+1})$.
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Transitions} & $\mathcal L_{\rm JEPA}$ & shuffled action & identity baseline & $\lambda\mathcal L_{\rm JEPA}$ \\
+\midrule
+2{,}048  & $0.00801$ & $0.01863$ & $0.26834$ & $2.0\times10^{-4}$ \\
+4{,}096  & $0.00355$ & $0.01167$ & $0.35455$ & $8.9\times10^{-5}$ \\
+6{,}144  & $0.00292$ & $0.01080$ & $0.19969$ & $7.3\times10^{-5}$ \\
+8{,}192  & $0.00264$ & $0.00944$ & $0.15826$ & $6.6\times10^{-5}$ \\
+10{,}000 & $0.00376$ & $0.00986$ & $0.12528$ & $9.4\times10^{-5}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+At 10k the predictor is $33\times$ better than the identity baseline and
+$2.6\times$ better than the action-shuffled variant, so it is neither
+collapsed nor ignoring the action. The action-conditioning is nonetheless
+secondary: the shuffled predictor already beats identity by $12.7\times$, so
+most of the predictive power comes from $z_t$ alone.
+
+Two caveats bound the interpretation. First, the weighted auxiliary
+contribution $\lambda\mathcal L_{\rm JEPA}\approx9.4\times10^{-5}$ is
+$0.003\%$ of the actor loss ($-3.304$); a loss this small relative to the
+policy term can still carry a disproportionate \emph{gradient} because the
+cosine gradient scales with $1/\lVert z\rVert$, so loss magnitude alone does
+not establish that the term is inert. Second, the variance floor is active only
+at the first checkpoint ($\mathcal L_{\rm var}=0.011$, then $0$ thereafter, with
+embedding standard deviation $0.09$--$0.12$ above the $0.1$ target), so the
+comparison is effectively SAC-only versus MSE-JEPA versus cosine-JEPA at
+$\lambda=0.025$.
+
+\section{Performance plots}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.32\linewidth]{../dumps/sac_10k/plots/learning_curve.png}
+\includegraphics[width=0.32\linewidth]{../dumps/sac_jepa_corrected_10k/plots/learning_curve.png}
+\includegraphics[width=0.32\linewidth]{../dumps/sac_jepa_cosine_10k/plots/learning_curve.png}
+\caption{Learning curves. Left: SAC. Centre: SAC+JEPA MSE+variance. Right:
+SAC+JEPA cosine. Lower panels are the auxiliary objective.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/dynamics_history_sac_000010000_seed100001.png}
+\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/acceleration_history_sac_000010000_seed100001.png}
+\caption{Cosine arm, held-out seed $100001$: physical and latent velocity with
+deterministic controls, and acceleration magnitudes with signed
+parallel/perpendicular components.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/inference_trajectories_seed100001.png}
+\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/inference_histories_seed100001.png}
+\caption{Cosine arm: deterministic inference trajectories over the terrain and
+the corresponding state/action histories.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/episode_diagnostics_sac_000010000_seed100001.png}
+\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/latent_umap_sac_000010000_seed100001.png}
+\caption{Cosine arm: full episode diagnostic and endpoint actor-encoder UMAP
+coloured by physical speed.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.62\linewidth]{../dumps/sac_jepa_cosine_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\caption{Cosine arm: pairwise joint UMAP grid across checkpoints $2{,}048$
+through $10{,}000$ on one common held-out trajectory.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.44\linewidth]{../dumps/sac_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=0.44\linewidth]{../dumps/sac_jepa_cosine_10k/plots/encoder_cka_matrix_seed100001.png}
+\caption{Linear CKA between checkpoint encoders on a held-out trajectory.
+Left: SAC. Right: SAC+JEPA cosine.}
+\end{figure}
+
+\clearpage
+\section{Conclusion}
+
+The loss-scale defect is fixed. Cosine normalization makes $\lambda$ a
+scale-free weight, the adversarial diagnostics show a predictor that genuinely
+uses both $z_t$ and $a_t$, and the objective is no longer the trivial
+near-identity map diagnosed in the earlier MSE branch.
+
+The auxiliary objective nevertheless still trails vanilla SAC at this budget:
+$1.188$ against $1.655$ ($-28.2\%$), with the MSE variant intermediate at
+$1.403$. Three limits prevent a stronger claim. The comparison is
+single-seed, so with $\pm$ reported across held-out terrains rather than runs
+the gaps are not statistically resolvable. The $10$k budget sits inside the
+takeoff region, where a shift in takeoff timing moves the endpoint by roughly
+the observed margin. And the horizon is still a single step, so the target
+carries little long-range dynamics even though it is now predicted well.
+
+Establishing whether one-step JEPA helps or harms SAC requires matched
+multi-seed runs at $\ge100$k transitions, with the variance floor and the
+action-conditioning ablated independently.
+
+\end{document}

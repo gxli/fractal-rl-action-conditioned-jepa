@@ -1,0 +1,5 @@
+terrain:
+  spectral_exponent: 3.0
+  intensity_min: 0.0
+  intensity_max: 1.0
+  gradient_normalization_percentile: 95.0

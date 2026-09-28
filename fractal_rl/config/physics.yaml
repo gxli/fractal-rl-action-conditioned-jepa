@@ -1,0 +1,5 @@
+physics:
+  potential_scale: 4.0
+  linear_damping: 0.6
+  power_limit: null
+  power_speed_epsilon: 0.1

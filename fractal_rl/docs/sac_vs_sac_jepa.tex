@@ -1,0 +1,136 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{SAC vs.\ SAC+JEPA at a 10{,}000-transition budget}
+\author{}
+\date{September 20, 2026}
+
+\begin{document}
+\maketitle
+
+\noindent
+Both runs share the standardized centered-Gaussian terrain, periodic tiling,
+random start positions, the $P_{\max}=6$ longitudinal power cap, 16 parallel
+environments, the same replay configuration, the same evaluation interval, and
+the held-out terrain seeds $100001$--$100004$. Only the actor objective differs.
+All numbers below are single-run, 10k-transition, RTX~3090 results.
+
+\section{What differs}
+
+\begin{center}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.24\linewidth}
+                >{\raggedright\arraybackslash}p{0.33\linewidth}
+                >{\raggedright\arraybackslash}p{0.33\linewidth}}
+\toprule
+\textbf{Aspect} & \textbf{SAC (vanilla)} & \textbf{SAC+JEPA} \\
+\midrule
+Actor objective & $\mathbb E[\alpha\log\pi(a|o)-\min(Q_1,Q_2)]$ &
+$\mathbb E[\alpha\log\pi(a|o)-\min(Q_1,Q_2)] + \lambda_{\rm JEPA}\mathcal L_{\rm JEPA} + c_{\rm var}\mathcal L_{\rm var}$ \\
+Predictive term & none &
+one-step latent MSE: $\lVert q_\psi([f_\theta(o_t),a_t])-\operatorname{sg}[\bar f(o_{t+1})]\rVert_2^2$ \\
+$\lambda_{\rm JEPA}$ & $0$ & $0.1$ (measured run); $0.025$ (corrected overlay) \\
+EMA target cadence & not applicable &
+once per replay-gradient update (measured run, unguarded);
+once per $64$ collected transitions (corrected) \\
+Variance floor & none &
+none (measured run); $0.01\,\mathrm{relu}(0.1-\mathrm{std}(f_\theta))$ (corrected) \\
+Reported metrics & \code{actor\_loss}, \code{critic\_loss}, \code{alpha} &
+adds \code{actor\_total\_loss}, \code{jepa\_loss}, and (corrected) \code{jepa\_variance\_loss}, \code{jepa\_embedding\_std} \\
+Replay, collection, terrain, seeds & shared & shared \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Result}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Transitions} & \textbf{SAC} & \textbf{SAC+JEPA} \\
+\midrule
+2{,}048  & $0.064 \pm 0.031$ & $0.064 \pm 0.031$ \\
+4{,}096  & $0.190 \pm 0.027$ & $0.190 \pm 0.029$ \\
+6{,}144  & $0.292 \pm 0.042$ & $0.279 \pm 0.041$ \\
+8{,}192  & $0.673 \pm 0.041$ & $0.641 \pm 0.048$ \\
+10{,}000 & $\mathbf{1.655 \pm 0.056}$ & $\mathbf{1.278 \pm 0.042}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The endpoints differ by $0.377$ ($22.8\%$) in favour of vanilla SAC. The
+$\pm$ values are standard deviations across the four held-out terrain seeds,
+\emph{not} across training runs, so they are not an error bar on the
+SAC-vs-SAC+JEPA difference; with one training seed per arm this gap is not
+statistically distinguishable.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{../dumps/sac_10k/plots/learning_curve.png}
+\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_10k_v2/plots/learning_curve.png}
+\caption{Left: SAC-only. Right: SAC+JEPA ($\lambda_{\rm JEPA}=0.1$,
+pre-correction branch). Both are at the same 10k budget.}
+\end{figure}
+
+\section{Why SAC+JEPA is below vanilla}
+
+\begin{enumerate}
+\item \textbf{The measured run used the pre-correction EMA cadence.} The target
+was updated once per replay-gradient update. With 16 environments and one
+update per transition, roughly $1{,}056$ EMA calls occur between transitions
+$1{,}000$ and $2{,}048$, so $1-(1-0.01)^{1056}\approx 99.998\%$ of the online
+weights are absorbed: the target is numerically the online encoder. The
+objective then reduces to a near-identity map, which is exactly what the
+observed loss of $9.1\times10^{-6}$ to $3.5\times10^{-5}$ indicates.
+\item \textbf{One-step horizon.} With $\mathrm{d}t=0.02$ and two substeps, a
+step advances $0.04$\,s, so consecutive field-of-view observations are nearly
+identical. Even with a correctly lagged target, ``predict $z_{t+1}$ from
+$z_t$'' is close to trivial and carries little dynamics signal.
+\item \textbf{The coefficient was inherited from PPO.} PPO+JEPA reached a loss
+of $5.95\times10^{-4}$ at the same $\lambda$, about $17\times$ the SAC loss
+scale, so $\lambda=0.1$ is not matched to the SAC encoder.
+\item \textbf{Placement.} JEPA shapes only the actor encoder. The twin $Q$
+critics keep independent encoders and receive no auxiliary signal, so the term
+cannot improve value estimation and can only perturb the policy
+representation.
+\item \textbf{Budget and variance.} At $10$k transitions both curves are inside
+their steep takeoff (SAC rises $0.67\rightarrow1.65$ between $8{,}192$ and
+$10{,}000$), so a one-step shift in takeoff timing moves the endpoint by
+roughly the observed margin.
+\end{enumerate}
+
+\section{What the corrected branch changes, and what remains}
+
+The corrected code (i) updates the EMA target once per $64$ collected
+transitions, decoupling the lag from \code{num\_parallel\_envs} and
+\code{updates\_per\_step} (effective lag $\approx 637$ gradient steps instead
+of $\approx 100$); (ii) adds a VICReg-style variance floor on the online
+representation; (iii) logs the unregularized actor objective separately from
+the optimized combined objective; and (iv) begins at $\lambda_{\rm JEPA}=0.025$.
+
+Two limitations remain. First, \textbf{the JEPA term is negligible relative to
+the variance term} at the corrected scales: at the observed 10k loss of
+$9.1\times10^{-6}$ the JEPA contribution is $2.3\times10^{-7}$ while the
+variance term is $\approx 5\times10^{-4}$, a ratio of roughly $2{,}200$ (and
+still $\approx 570$ at the largest observed loss). A corrected run therefore
+tests a variance regularizer more than it tests JEPA. Second, the trainer
+\emph{raises} when $\lambda_{\rm JEPA}>0$ and $c_{\rm var}\le 0$, so the
+variance term cannot be ablated, and the same guard is absent from the PPO
+trainer. The horizon is still one step and the objective is still attached only
+to the actor encoder.
+
+\medskip
+\noindent
+\textbf{Status.} No 10k run of the corrected branch exists yet. The $1.278$
+result above came from the earlier branch, so it is evidence that the original
+auxiliary path ran, not a test of the corrected objective. Multi-seed runs at
+$\ge 100$k transitions, with the variance term ablated, are required before any
+performance conclusion.
+
+\end{document}

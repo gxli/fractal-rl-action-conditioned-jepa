@@ -1,0 +1,4 @@
+# Optional overlay: action-conditioned, one-step JEPA auxiliary objective.
+training:
+  jepa_coef: 0.1
+  jepa_target_tau: 0.01

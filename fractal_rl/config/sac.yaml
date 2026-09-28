@@ -1,0 +1,11 @@
+# SAC overlay. Keep it separate from PPO so comparisons are like-for-like.
+sac:
+  learning_rate: 0.0003
+  gamma: 0.99
+  tau: 0.005
+  buffer_size: 20000
+  batch_size: 128
+  learning_starts: 1000
+  initial_alpha: 0.2
+  target_entropy: -2.0
+  updates_per_step: 1

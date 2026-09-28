@@ -1,0 +1,4 @@
+training:
+  rollout_steps: 128
+  update_epochs: 4
+  minibatch_size: 256

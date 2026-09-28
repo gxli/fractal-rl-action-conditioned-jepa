@@ -1,0 +1,99 @@
+terrain:
+  resolution: 512
+  # A low-frequency dominated fractal landscape.  This creates spatially
+  # persistent basins and connected valleys rather than pixel-scale corrugation.
+  spectral_exponent: 3.0
+  seed: 42
+  pixel_size: 1.0
+  intensity_min: 0.0
+  intensity_max: 1.0
+  normalize_percentiles: [1.0, 99.0]
+  # Normalize grad(phi) by this percentile of its magnitude, so the physics
+  # potential_scale directly expresses a characteristic field acceleration.
+  gradient_normalization_percentile: 95.0
+physics:
+  dt: 0.02
+  substeps: 2
+  mass: 1.0
+  max_forward_acceleration: 2.0
+  # Optional mechanical-power cap for longitudinal control.  When set, the
+  # magnitude of parallel acceleration is min(max_forward_acceleration,
+  # power_limit / (mass * max(speed, power_speed_epsilon))).  Null preserves
+  # the acceleration-limited baseline.
+  power_limit: null
+  power_speed_epsilon: 0.1
+  max_perpendicular_acceleration: 1.0
+  steering_convention: right
+  # Acceleration field: a_phi = -potential_scale * normalized_grad(phi), phi = |I|^2.
+  # Twice max forward acceleration at a 95th-percentile slope: escaping a
+  # steep wall requires choosing connected low-potential corridors.
+  potential_scale: 4.0
+  # Linear dissipative acceleration: a_resist = -linear_damping * velocity.
+  # With max forward acceleration 2.0, eta=0.6 limits flat-field steady speed
+  # to about 3.3, so terrain-scale acceleration cannot be averaged away by inertia.
+  linear_damping: 0.6
+  initial_speed_min: 0.0
+  initial_speed_max: 1.0
+  heading_epsilon: 1.0e-6
+agent:
+  # "unshared" avoids actor/critic representation-gradient interference;
+  # "shared" remains an explicit baseline and legacy-checkpoint fallback.
+  architecture: unshared
+  steering_convention: right
+  fov_size: 32
+  fov_pixel_size: 1.0
+  velocity_scale: 6.0
+  mass_scale: 1.0
+reward:
+  speed_weight: 1.0
+  # A small explicit resource cost complements bounded acceleration.
+  control_penalty: 0.05
+  action_change_penalty: 0.0
+environment:
+  episode_steps: 2000
+  # Sample a fresh position uniformly over the periodic terrain tile at reset.
+  # Disable only for deterministic debugging from the tile centre.
+  random_start_position: true
+  num_parallel_envs: 16
+  training_terrain_count: 64
+  evaluation_terrain_seeds: [100001, 100002, 100003, 100004]
+training:
+  total_timesteps: 5000000
+  rollout_steps: 128
+  update_epochs: 4
+  minibatch_size: 256
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  # Set null to recover the original unclipped value-loss baseline.
+  value_clip_range: 0.2
+  # One preserves the original serial stepping baseline; >1 uses worker threads.
+  parallel_env_workers: 1
+  entropy_coef: 0.0
+  # Optional action-conditioned JEPA auxiliary loss. Zero preserves the base
+  # algorithm; SAC and PPO may tune this coefficient independently.
+  jepa_coef: 0.0
+  # EMA update fraction; SAC applies it once per configured count of collected
+  # transitions, rather than once per replay-gradient update.
+  jepa_target_tau: 0.01
+  jepa_target_update_transitions: 64
+  # SAC+JEPA requires a positive coefficient via config/sac_jepa.yaml.
+  jepa_variance_coef: 0.0
+  jepa_variance_target: 0.1
+  value_coef: 0.5
+  max_grad_norm: 0.5
+  seed: 123
+  checkpoint_interval: 100000
+  evaluation_interval: 50000
+output:
+  dump_dir: dumps
+  movie_dir: movies
+  fps: 30
+analysis:
+  # Default full-flush analysis template, run with driver.flush_analysis.
+  inference_seed: 100001
+  inference_steps: 2000
+  pairwise_steps: 1000
+  pairwise_limit: 5
+  pairwise_plot_size: 5

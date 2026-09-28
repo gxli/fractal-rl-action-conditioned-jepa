@@ -1,0 +1,3 @@
+agent:
+  fov_size: 32
+  fov_pixel_size: 1.0

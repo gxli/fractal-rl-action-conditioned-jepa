@@ -1,0 +1,9 @@
+# SAC-specific starting point. This is deliberately lower than the historical
+# PPO exploratory value (0.1): loss scales are algorithm/encoder dependent.
+training:
+  jepa_coef: 0.025
+  jepa_target_tau: 0.01
+  jepa_target_update_transitions: 64
+  # VICReg-style variance floor on the online actor representation.
+  jepa_variance_coef: 0.01
+  jepa_variance_target: 0.1

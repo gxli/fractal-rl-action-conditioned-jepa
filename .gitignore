@@ -1,0 +1,49 @@
+# Operating-system and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Python bytecode, environments, and test/tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Training, evaluation, and visualization artifacts
+fractal_rl/dumps/
+fractal_rl/movies/
+fractal_rl/output/
+fractal_rl/tmp/
+fractal_rl/**/*.pt
+fractal_rl/**/*.pth
+fractal_rl/**/*.ckpt
+fractal_rl/**/*.onnx
+fractal_rl/**/*.npz
+fractal_rl/**/wandb/
+
+# Generated reports and LaTeX build intermediates
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+
+# Local archives
+*.zip
+
+# Ad-hoc files generated at the repository root
+/sac_jepa_repeat4_report.*
+/summary.txt

@@ -1,0 +1,7 @@
+# Optional overlay for a longitudinal mechanical-power-limited vehicle.
+physics:
+  # Starts to throttle only above speed 3, near the flat-field terminal speed.
+  power_limit: 6.0
+  power_speed_epsilon: 0.1
+environment:
+  random_start_position: true
