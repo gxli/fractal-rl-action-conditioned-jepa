@@ -12,7 +12,7 @@ fractal_rl/
 ├── driver/       # Training, evaluation, plotting, and analysis entry points
 ├── src/          # Environment, terrain, physics, RL, and utility modules
 ├── tests/        # Automated tests
-├── docs/         # Project reports and their LaTeX sources
+├── documents/    # Project reports and their LaTeX sources
 └── requirements.txt
 ```
 
@@ -77,7 +77,7 @@ Experiment outputs are not committed because checkpoints can be large and `torch
 
 ## Reports
 
-Research reports and their sources are available in [`fractal_rl/docs/`](fractal_rl/docs/). They document the evolving SAC/JEPA comparisons; generated working PDFs and rendering intermediates are excluded.
+Research reports and their sources are available in [`fractal_rl/documents/`](fractal_rl/documents/). They document the evolving SAC/JEPA comparisons; generated working PDFs and rendering intermediates are excluded.
 
 ## License
 

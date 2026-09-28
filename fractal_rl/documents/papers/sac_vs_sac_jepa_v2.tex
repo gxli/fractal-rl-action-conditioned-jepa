@@ -53,40 +53,40 @@ action-shuffled loss, identity baseline, and embedding spread.
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{output/pdf/sac_only_learning_curve.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/learning_curve.png}
+\includegraphics[width=.49\linewidth]{../output/pdf/sac_only_learning_curve.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_10k/plots/learning_curve.png}
 \caption{Performance curves. Left: SAC-only. Right: normalized cosine SAC+JEPA.
 The right lower panel is the scale-free predictive loss.}
 \end{figure}
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/latent_umap_sac_000010000_seed100001.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/latent_umap_sac_000010000_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_10k/plots/latent_umap_sac_000010000_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_10k/plots/latent_umap_sac_000010000_seed100001.png}
 \caption{Endpoint terrain-overlay trajectories and UMAPs on the same held-out
 seed. Left: SAC-only. Right: normalized cosine SAC+JEPA.}
 \end{figure}
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/dynamics_history_sac_000010000_seed100001.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/dynamics_history_sac_000010000_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_10k/plots/dynamics_history_sac_000010000_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_10k/plots/dynamics_history_sac_000010000_seed100001.png}
 \caption{Full velocity, control, and acceleration diagnostics. Left: SAC-only.
 Right: normalized cosine SAC+JEPA.}
 \end{figure}
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/encoder_cka_matrix_seed100001.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_10k/plots/encoder_cka_matrix_seed100001.png}
 \caption{Encoder evolution across the five saved checkpoints, measured by
 linear CKA on a common held-out inference trajectory.}
 \end{figure}
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{dumps/sac_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
 \caption{Checkpoint-pair latent matrix on the shared deterministic held-out
 trajectory. Each cell jointly embeds the row and counterpart encoder states
 (blue/orange); diagonal cells are self-comparisons. Left: SAC-only. Right:
@@ -131,7 +131,7 @@ slower than SAC: that requires the matched 50k SAC-only control now in flight.
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.92\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/learning_curve.png}
+\includegraphics[width=.92\linewidth]{../dumps/sac_jepa_cosine_50k_v2/plots/learning_curve.png}
 \caption{V2 held-out performance and auxiliary diagnostics across 50k
 transitions. The held-out speed rises sharply after 10k and stabilizes near
 2.95 from approximately 18k onward.}
@@ -139,8 +139,8 @@ transitions. The held-out speed rises sharply after 10k and stabilizes near
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/latent_umap_sac_000050000_seed100001.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/dynamics_history_sac_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_50k_v2/plots/latent_umap_sac_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_50k_v2/plots/dynamics_history_sac_000050000_seed100001.png}
 \caption{V2 endpoint deterministic inference on held-out seed 100001. Left:
 terrain-overlay trajectory and encoder UMAP. Right: velocity, input, field,
 damping, and net acceleration histories.}
@@ -148,8 +148,8 @@ damping, and net acceleration histories.}
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/encoder_cka_matrix_seed100001.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_50k_v2/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_50k_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
 \caption{V2 encoder evolution across the five 10k-spaced checkpoints on one
 shared held-out trajectory. Left: linear CKA. Right: pairwise joint UMAP
 matrix (blue/orange are the two checkpoint encoders in each cell).}
@@ -178,7 +178,7 @@ Transitions & SAC-only & SAC+JEPA & JEPA minus SAC \\
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=.88\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/matched_sac_vs_jepa_50k.png}
+\includegraphics[width=.88\linewidth]{../dumps/sac_jepa_cosine_50k_v2/plots/matched_sac_vs_jepa_50k.png}
 \caption{Direct matched 50k held-out comparison. The curves cross during the
 early transient and are nearly identical from about 16k onward. Shading is the
 held-out standard deviation across the fixed evaluation seeds.}
@@ -200,8 +200,8 @@ encoder differ.
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{dumps/sac_50k_control_v2/plots/latent_umap_sac_000050000_seed100001.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/latent_umap_sac_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_50k_control_v2/plots/latent_umap_sac_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_50k_v2/plots/latent_umap_sac_000050000_seed100001.png}
 \caption{Matched endpoint terrain-overlay trajectory and latent UMAP. Left:
 SAC-only. Right: SAC+JEPA. Point colour maps the two UMAP coordinates back to
 the physical trajectory.}
@@ -209,8 +209,8 @@ the physical trajectory.}
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{dumps/sac_50k_control_v2/plots/dynamics_history_sac_000050000_seed100001.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/dynamics_history_sac_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_50k_control_v2/plots/dynamics_history_sac_000050000_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_50k_v2/plots/dynamics_history_sac_000050000_seed100001.png}
 \caption{Matched endpoint velocity and acceleration histories. Left:
 SAC-only. Right: SAC+JEPA. Each panel contains speed and latent velocity,
 actions, and signed input/potential/damping/net acceleration components.}
@@ -218,8 +218,8 @@ actions, and signed input/potential/damping/net acceleration components.}
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{dumps/sac_50k_control_v2/plots/encoder_cka_matrix_seed100001.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_50k_control_v2/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_50k_v2/plots/encoder_cka_matrix_seed100001.png}
 \caption{Within-run representation evolution on a common held-out trajectory.
 Left: SAC-only. Right: SAC+JEPA. Each 5 by 5 matrix is linear CKA across the
 10k, 20k, 30k, 40k, and 50k checkpoints.}
@@ -227,8 +227,8 @@ Left: SAC-only. Right: SAC+JEPA. Each 5 by 5 matrix is linear CKA across the
 
 \begin{figure}[p]
 \centering
-\includegraphics[width=.49\linewidth]{dumps/sac_50k_control_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
-\includegraphics[width=.49\linewidth]{dumps/sac_jepa_cosine_50k_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_50k_control_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=.49\linewidth]{../dumps/sac_jepa_cosine_50k_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
 \caption{Pairwise joint UMAP trajectory matrices for the same checkpoints.
 Blue and orange are the row and counterpart encoders evaluated on identical
 held-out inference states. Left: SAC-only. Right: SAC+JEPA.}

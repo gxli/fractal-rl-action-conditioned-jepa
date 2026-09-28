@@ -45,7 +45,7 @@ L_{\rm JEPA}=1-\cos\!\left(q([z_t,a_t,\ldots,a_{t+K-1}]),\operatorname{sg}[\bar 
 For all JEPA arms, action-margin, inverse-dynamics, and variance terms are exactly zero. Critics read the shared encoder and train it through TD loss; the actor reads a detached latent. Transfer freezes both actor and critic encoders and trains only policy/value heads on $\alpha=2$ or $\alpha=3.5$.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_speed_curves.png}
+\includegraphics[width=\linewidth]{../dumps/ar4_analysis/actionrepeat4_speed_curves.png}
 \caption{New repeat-4 learning curves. The source panel includes the newly
 completed separate-encoder JEPA K=32 curve (orange); it is source-only until
 matched frozen transfers are run. The horizontal axis is physical simulation
@@ -53,7 +53,7 @@ steps, so all matched panels cover the same 80k-step physical budget.}
 \end{figure}
 
 \begin{figure}[ht]\centering
-\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_final_speeds.png}
+\includegraphics[width=\linewidth]{../dumps/ar4_analysis/actionrepeat4_final_speeds.png}
 \caption{Final held-out speeds. Error bars are standard deviations across the four held-out terrain seeds.}
 \end{figure}
 
@@ -61,7 +61,7 @@ steps, so all matched panels cover the same 80k-step physical budget.}
 The shuffled-action ratio compares real-action and batch-shuffled-action prediction loss. Values below one mean that the true action sequence is more predictive than shuffled controls. The diagnostics show a substantial decline from the initial near-action-blind state, as expected from the larger physical forecast. They do not, by themselves, establish a behavioural advantage over SAC.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_jepa_diagnostics.png}
+\includegraphics[width=\linewidth]{../dumps/ar4_analysis/actionrepeat4_jepa_diagnostics.png}
 \caption{Source JEPA diagnostics at the repeat-4 sampling rate.}
 \end{figure}
 
@@ -73,7 +73,7 @@ Thus the visualizations describe what the policy and value heads see on their
 own trajectories, not a generic image embedding.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.99\linewidth]{dumps/ar4_analysis/actionrepeat4_trajectory_umap_montage.png}
+\includegraphics[width=.99\linewidth]{../dumps/ar4_analysis/actionrepeat4_trajectory_umap_montage.png}
 \caption{Matched held-out terrain walks and per-encoder PCA/UMAP panels for
 the four source arms. Rows, from upper-left clockwise, are SAC, JEPA K=32,
 JEPA K=64, and JEPA+spherical-MMD K=32; the method label is printed above each
@@ -81,13 +81,13 @@ panel.}
 \end{figure}
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.72\linewidth]{dumps/ar4_jepa_sigreg_k32_source_a3/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\includegraphics[width=.72\linewidth]{../dumps/ar4_jepa_sigreg_k32_source_a3/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
 \caption{JEPA+SIGReg K=32 source trajectory and actor/$Q_1$/$Q_2$ PCA/UMAP
 views, included as the matched regularized source representation.}
 \end{figure}
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.72\linewidth]{dumps/ar4_analysis/actionrepeat4_k64_transfer_trajectory_umap.png}
+\includegraphics[width=.72\linewidth]{../dumps/ar4_analysis/actionrepeat4_k64_transfer_trajectory_umap.png}
 \caption{Same K=64 JEPA architecture across source training and frozen-encoder
 transfers. Each labelled panel contains its held-out terrain walk plus actor,
 $Q_1$, and $Q_2$ PCA/UMAP views.}
@@ -101,19 +101,19 @@ alignment comparison below uses independent actor/Q encoders in both arms;
 the shared-backbone CKA is deliberately excluded because it is trivial.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.72\linewidth]{dumps/ar4_analysis/actionrepeat4_fair_encoder_alignment.png}
+\includegraphics[width=.72\linewidth]{../dumps/ar4_analysis/actionrepeat4_fair_encoder_alignment.png}
 \caption{Fair centered linear CKA: vanilla SAC versus separate-encoder JEPA
 K=32, with actor, $Q_1$, and $Q_2$ all independently parameterized.}
 \end{figure}
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.9\linewidth]{dumps/ar4_analysis/actionrepeat4_manifold_diagnostics.png}
+\includegraphics[width=.9\linewidth]{../dumps/ar4_analysis/actionrepeat4_manifold_diagnostics.png}
 \caption{Effective and local intrinsic dimensions measured on the same common
 probe.}
 \end{figure}
 
 \begin{figure}[ht]\centering
-\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_losses.png}
+\includegraphics[width=\linewidth]{../dumps/ar4_analysis/actionrepeat4_losses.png}
 \caption{All logged source optimization objectives. The auxiliary JEPA term is
 shown separately in the diagnostic panel; inverse, margin, variance, and
 critic-JEPA terms are zero by construction in this sweep.}
@@ -128,7 +128,7 @@ independent actor, $Q_1$, and $Q_2$ encoders. The three columns avoid the
 ambiguity of a single mixed encoder matrix.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_temporal_cka.png}
+\includegraphics[width=\linewidth]{../dumps/ar4_analysis/actionrepeat4_temporal_cka.png}
 \caption{Checkpoint-to-checkpoint CKA on an identical held-out observation
 probe. Top: vanilla SAC. Middle: matched separate-encoder JEPA K=32, the fair
 JEPA stabilization comparison. Bottom: critic-trained shared JEPA K=32, shown
@@ -148,7 +148,7 @@ higher on frozen transfer. This is a one-run result, not a final architecture
 choice; the figure makes the tradeoff explicit.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=\linewidth]{dumps/ar4_analysis/actionrepeat4_encoder_sharing_ablation.png}
+\includegraphics[width=\linewidth]{../dumps/ar4_analysis/actionrepeat4_encoder_sharing_ablation.png}
 \caption{Repeat-4 K=32 encoder-sharing ablation: critic TD gradients update
 the shared encoder versus actor/JEPA-only encoder updates.}
 \end{figure}

@@ -153,17 +153,17 @@ $\lambda=0.025$.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.32\linewidth]{../dumps/sac_10k/plots/learning_curve.png}
-\includegraphics[width=0.32\linewidth]{../dumps/sac_jepa_corrected_10k/plots/learning_curve.png}
-\includegraphics[width=0.32\linewidth]{../dumps/sac_jepa_cosine_10k/plots/learning_curve.png}
+\includegraphics[width=0.32\linewidth]{../../../dumps/sac_10k/plots/learning_curve.png}
+\includegraphics[width=0.32\linewidth]{../../../dumps/sac_jepa_corrected_10k/plots/learning_curve.png}
+\includegraphics[width=0.32\linewidth]{../../../dumps/sac_jepa_cosine_10k/plots/learning_curve.png}
 \caption{Learning curves. Left: SAC. Centre: SAC+JEPA MSE+variance. Right:
 SAC+JEPA cosine. Lower panels are the auxiliary objective.}
 \end{figure}
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/dynamics_history_sac_000010000_seed100001.png}
-\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/acceleration_history_sac_000010000_seed100001.png}
+\includegraphics[width=0.48\linewidth]{../../../dumps/sac_jepa_cosine_10k/plots/dynamics_history_sac_000010000_seed100001.png}
+\includegraphics[width=0.48\linewidth]{../../../dumps/sac_jepa_cosine_10k/plots/acceleration_history_sac_000010000_seed100001.png}
 \caption{Cosine arm, held-out seed $100001$: physical and latent velocity with
 deterministic controls, and acceleration magnitudes with signed
 parallel/perpendicular components.}
@@ -171,31 +171,31 @@ parallel/perpendicular components.}
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/inference_trajectories_seed100001.png}
-\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/inference_histories_seed100001.png}
+\includegraphics[width=0.48\linewidth]{../../../dumps/sac_jepa_cosine_10k/plots/inference_trajectories_seed100001.png}
+\includegraphics[width=0.48\linewidth]{../../../dumps/sac_jepa_cosine_10k/plots/inference_histories_seed100001.png}
 \caption{Cosine arm: deterministic inference trajectories over the terrain and
 the corresponding state/action histories.}
 \end{figure}
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/episode_diagnostics_sac_000010000_seed100001.png}
-\includegraphics[width=0.48\linewidth]{../dumps/sac_jepa_cosine_10k/plots/latent_umap_sac_000010000_seed100001.png}
+\includegraphics[width=0.48\linewidth]{../../../dumps/sac_jepa_cosine_10k/plots/episode_diagnostics_sac_000010000_seed100001.png}
+\includegraphics[width=0.48\linewidth]{../../../dumps/sac_jepa_cosine_10k/plots/latent_umap_sac_000010000_seed100001.png}
 \caption{Cosine arm: full episode diagnostic and endpoint actor-encoder UMAP
 coloured by physical speed.}
 \end{figure}
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.62\linewidth]{../dumps/sac_jepa_cosine_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=0.62\linewidth]{../../../dumps/sac_jepa_cosine_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
 \caption{Cosine arm: pairwise joint UMAP grid across checkpoints $2{,}048$
 through $10{,}000$ on one common held-out trajectory.}
 \end{figure}
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.44\linewidth]{../dumps/sac_10k/plots/encoder_cka_matrix_seed100001.png}
-\includegraphics[width=0.44\linewidth]{../dumps/sac_jepa_cosine_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=0.44\linewidth]{../../../dumps/sac_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=0.44\linewidth]{../../../dumps/sac_jepa_cosine_10k/plots/encoder_cka_matrix_seed100001.png}
 \caption{Linear CKA between checkpoint encoders on a held-out trajectory.
 Left: SAC. Right: SAC+JEPA cosine.}
 \end{figure}

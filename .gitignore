@@ -47,3 +47,6 @@ fractal_rl/**/wandb/
 # Ad-hoc files generated at the repository root
 /sac_jepa_repeat4_report.*
 /summary.txt
+/generate_summary.py
+/fractal_rl/summary.txt
+/fractal_rl/generate_summary.py

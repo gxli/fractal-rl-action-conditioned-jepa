@@ -113,7 +113,7 @@ location while preserving the same tiled landscape.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/plots/power_limited_mode.png}
+\includegraphics[width=\linewidth]{../dumps/plots/power_limited_mode.png}
 \caption{New diagnostics. Left: potential made by centering the filtered Gaussian
 field and squaring it. Right: the optional power cap retains full acceleration at
 low speed and throttles the magnitude of longitudinal acceleration as speed rises.}
@@ -234,7 +234,7 @@ figure below is regenerated from this checkpoint and held-out inference.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/power_limited_6_10k/plots/learning_curve.png}
+\includegraphics[width=\linewidth]{../dumps/power_limited_6_10k/plots/learning_curve.png}
 \caption{Corrected RTX 3090 run: rollout speed (gray) and deterministic
 held-out mean speed (teal). The band is standard deviation over four held-out seeds.}
 \label{fig:learning}
@@ -277,7 +277,7 @@ The analysis command \code{python -m driver.analyze\_latent CHECKPOINT --device 
 runs the deterministic policy on a held-out terrain. At every step it records
 physical position, speed, potential, action, critic value, and the exact
 128-D output of \code{ActorCritic.encode}. The raw trajectory is stored in
-\code{dumps/latents/} as both a compressed NumPy archive and a CSV with
+\code{../dumps/latents/} as both a compressed NumPy archive and a CSV with
 \code{latent\_000} through \code{latent\_127} columns. This is a dump of the
 shared representation before either actor or critic head, not a visualization
 of the two action outputs.
@@ -299,7 +299,7 @@ coordinate. Black denotes locations where both normalized coordinates are low.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/power_limited_6_pairwise_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/power_limited_6_pairwise_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
 \caption{Corrected 3090 pairwise joint UMAPs across checkpoints 2,048, 4,096,
 6,144, 8,192, and 10,000, using the same held-out inference trajectory. Blue is
 the row encoder and orange is the column counterpart; diagonal cells compare an
@@ -326,7 +326,7 @@ acceleration trace.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.76\linewidth]{dumps/power_limited_6_pairwise_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=0.76\linewidth]{../dumps/power_limited_6_pairwise_10k/plots/encoder_cka_matrix_seed100001.png}
 \caption{Linear CKA matrix for the same corrected 3090 checkpoints and held-out
 trajectory. Unlike joint UMAP, CKA is quantitative and remains invariant to
 feature-coordinate rotations and permutations.}
@@ -349,7 +349,7 @@ result; no PPO figures or metrics above were replaced.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_10k/plots/learning_curve.png}
+\includegraphics[width=\linewidth]{../dumps/sac_10k/plots/learning_curve.png}
 \caption{Appended SAC-only RTX 3090 run: rollout and deterministic held-out
 mean speed. The lower panel records JEPA loss, which is zero because the
 auxiliary objective is disabled for this baseline.}
@@ -358,7 +358,7 @@ auxiliary objective is disabled for this baseline.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_10k/plots/latent_umap_sac_000010000_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/sac_10k/plots/latent_umap_sac_000010000_seed100001.png}
 \caption{Appended SAC endpoint deterministic inference on held-out seed 100001.
 Left: trajectory over the terrain-potential overlay. Right: the SAC actor
 encoder trajectory in UMAP, colored by physical speed.}
@@ -367,7 +367,7 @@ encoder trajectory in UMAP, colored by physical speed.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_10k/plots/dynamics_history_sac_000010000_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/sac_10k/plots/dynamics_history_sac_000010000_seed100001.png}
 \caption{Appended SAC full dynamics diagnostic: physical and latent velocity,
 controls, control/field/damping/net acceleration magnitudes, and signed
 parallel/perpendicular acceleration over the same terrain-overlay inference.}
@@ -376,7 +376,7 @@ parallel/perpendicular acceleration over the same terrain-overlay inference.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/sac_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
 \caption{Appended SAC pairwise joint UMAP grid across checkpoints 2,048 through
 10,000 on the same held-out probe trajectory.}
 \label{fig:sac-pairwise}
@@ -384,7 +384,7 @@ parallel/perpendicular acceleration over the same terrain-overlay inference.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.76\linewidth]{dumps/sac_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=0.76\linewidth]{../dumps/sac_10k/plots/encoder_cka_matrix_seed100001.png}
 \caption{Appended SAC linear CKA matrix across the same checkpoints.}
 \label{fig:sac-cka}
 \end{figure}
@@ -419,7 +419,7 @@ predictor/EMA path is active rather than merely configured.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/ppo_jepa_10k/plots/learning_curve.png}
+\includegraphics[width=\linewidth]{../dumps/ppo_jepa_10k/plots/learning_curve.png}
 \caption{Appended PPO+JEPA RTX 3090 learning curve. Top: rollout and
 deterministic held-out speed. Bottom: finite JEPA prediction loss, decreasing
 over the five saved checkpoints.}
@@ -428,7 +428,7 @@ over the five saved checkpoints.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/ppo_jepa_10k/plots/latent_umap_ppo_000010000_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/ppo_jepa_10k/plots/latent_umap_ppo_000010000_seed100001.png}
 \caption{Appended PPO+JEPA endpoint inference on held-out seed 100001. Left:
 terrain-potential overlay and deterministic trajectory. Right: actor-encoder
 UMAP colored by physical speed.}
@@ -437,7 +437,7 @@ UMAP colored by physical speed.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/ppo_jepa_10k/plots/dynamics_history_ppo_000010000_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/ppo_jepa_10k/plots/dynamics_history_ppo_000010000_seed100001.png}
 \caption{Appended PPO+JEPA full dynamics diagnostic: physical and latent
 velocity, control commands, control/field/damping/net accelerations, and
 signed parallel/perpendicular accelerations for the terrain-overlay episode.}
@@ -446,7 +446,7 @@ signed parallel/perpendicular accelerations for the terrain-overlay episode.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/ppo_jepa_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/ppo_jepa_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
 \caption{Appended PPO+JEPA pairwise joint UMAP grid across checkpoints 2,048
 through 10,000 on one common held-out inference trajectory.}
 \label{fig:jepa-pairwise}
@@ -454,7 +454,7 @@ through 10,000 on one common held-out inference trajectory.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.76\linewidth]{dumps/ppo_jepa_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=0.76\linewidth]{../dumps/ppo_jepa_10k/plots/encoder_cka_matrix_seed100001.png}
 \caption{Appended PPO+JEPA linear CKA matrix for the same encoder snapshots.}
 \label{fig:jepa-cka}
 \end{figure}
@@ -512,7 +512,7 @@ improvement at this coefficient and horizon.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_jepa_10k_v2/plots/learning_curve.png}
+\includegraphics[width=\linewidth]{../dumps/sac_jepa_10k_v2/plots/learning_curve.png}
 \caption{Appended SAC+JEPA RTX 3090 learning curve. The lower panel reports
 the actual replay-based JEPA loss, not a hardcoded zero.}
 \label{fig:sac-jepa-learning}
@@ -520,7 +520,7 @@ the actual replay-based JEPA loss, not a hardcoded zero.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_jepa_10k_v2/plots/latent_umap_sac_000010000_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/sac_jepa_10k_v2/plots/latent_umap_sac_000010000_seed100001.png}
 \caption{Appended SAC+JEPA endpoint deterministic inference on held-out seed
 100001: terrain-potential trajectory overlay and actor-encoder UMAP.}
 \label{fig:sac-jepa-trajectory-umap}
@@ -528,7 +528,7 @@ the actual replay-based JEPA loss, not a hardcoded zero.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_jepa_10k_v2/plots/dynamics_history_sac_000010000_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/sac_jepa_10k_v2/plots/dynamics_history_sac_000010000_seed100001.png}
 \caption{Appended SAC+JEPA physical/latent velocity, deterministic controls,
 acceleration magnitudes, and signed parallel/perpendicular acceleration traces
 for the same terrain-overlay inference episode.}
@@ -537,7 +537,7 @@ for the same terrain-overlay inference episode.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_jepa_10k_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/sac_jepa_10k_v2/plots/pairwise_encoder_umap_5x5_seed100001.png}
 \caption{Appended SAC+JEPA pairwise joint UMAP grid for checkpoints 2,048
 through 10,000, evaluated on one common held-out trajectory.}
 \label{fig:sac-jepa-pairwise}
@@ -545,7 +545,7 @@ through 10,000, evaluated on one common held-out trajectory.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.76\linewidth]{dumps/sac_jepa_10k_v2/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=0.76\linewidth]{../dumps/sac_jepa_10k_v2/plots/encoder_cka_matrix_seed100001.png}
 \caption{Appended SAC+JEPA linear CKA matrix. Early-to-endpoint CKA is 0.53,
 showing a material change in encoder geometry over this run.}
 \label{fig:sac-jepa-cka}
@@ -602,7 +602,7 @@ only at the first checkpoint, then zero once the requested spread is reached.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_jepa_corrected_10k/plots/learning_curve.png}
+\includegraphics[width=\linewidth]{../dumps/sac_jepa_corrected_10k/plots/learning_curve.png}
 \caption{Appended corrected SAC+JEPA RTX 3090 learning curve. The JEPA loss
 falls smoothly and is plotted alongside the held-out speed.}
 \label{fig:sac-jepa-corrected-learning}
@@ -610,7 +610,7 @@ falls smoothly and is plotted alongside the held-out speed.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_jepa_corrected_10k/plots/latent_umap_sac_000010000_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/sac_jepa_corrected_10k/plots/latent_umap_sac_000010000_seed100001.png}
 \caption{Appended corrected SAC+JEPA endpoint: deterministic terrain-potential
 overlay and actor-encoder UMAP on held-out seed 100001.}
 \label{fig:sac-jepa-corrected-umap}
@@ -618,7 +618,7 @@ overlay and actor-encoder UMAP on held-out seed 100001.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_jepa_corrected_10k/plots/dynamics_history_sac_000010000_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/sac_jepa_corrected_10k/plots/dynamics_history_sac_000010000_seed100001.png}
 \caption{Appended corrected SAC+JEPA velocity, controls, acceleration, and
 parallel/perpendicular acceleration diagnostic.}
 \label{fig:sac-jepa-corrected-dynamics}
@@ -626,7 +626,7 @@ parallel/perpendicular acceleration diagnostic.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{dumps/sac_jepa_corrected_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
+\includegraphics[width=\linewidth]{../dumps/sac_jepa_corrected_10k/plots/pairwise_encoder_umap_5x5_seed100001.png}
 \caption{Appended corrected SAC+JEPA pairwise UMAP comparison across its five
 saved checkpoints.}
 \label{fig:sac-jepa-corrected-pairwise}
@@ -634,7 +634,7 @@ saved checkpoints.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.76\linewidth]{dumps/sac_jepa_corrected_10k/plots/encoder_cka_matrix_seed100001.png}
+\includegraphics[width=0.76\linewidth]{../dumps/sac_jepa_corrected_10k/plots/encoder_cka_matrix_seed100001.png}
 \caption{Appended corrected SAC+JEPA CKA matrix. Early-to-endpoint CKA is 0.61,
 while consecutive late checkpoints remain more similar (0.76).}
 \label{fig:sac-jepa-corrected-cka}
@@ -707,22 +707,22 @@ as a shared-observation visualization, not proof of coordinate-wise agreement.
 
 \section{\,Artifacts and reproduction}
 The current tested learned network is
-\code{dumps/power\_limited\_6\_10k/checkpoints/ppo\_000010000.pt}. Each \code{.pt} file contains
+\code{../dumps/power\_limited\_6\_10k/checkpoints/ppo\_000010000.pt}. Each \code{.pt} file contains
 \code{model}, Adam \code{optimizer} state, the completed \code{steps}, resolved
 \code{config}, and Torch, NumPy, and Python RNG states. It supports deterministic
 evaluation but is not an exact training-resume snapshot.
-Training records are in \code{dumps/power\_limited\_6\_10k/metrics/training.csv}.
+Training records are in \code{../dumps/power\_limited\_6\_10k/metrics/training.csv}.
 
 The analysis additions write the following separate outputs:
 \begin{itemize}[leftmargin=1.4em,itemsep=2pt]
- \item \code{dumps/power\_limited\_6\_10k/plots/learning\_curve.png}: corrected RTX 3090 speed curve;
- \item \code{dumps/power\_limited\_6\_pairwise\_10k/plots/pairwise\_encoder\_umap\_*.png}: pairwise
+ \item \code{../dumps/power\_limited\_6\_10k/plots/learning\_curve.png}: corrected RTX 3090 speed curve;
+ \item \code{../dumps/power\_limited\_6\_pairwise\_10k/plots/pairwise\_encoder\_umap\_*.png}: pairwise
        joint UMAP grid across the corrected-run checkpoints;
- \item \code{dumps/power\_limited\_6\_pairwise\_10k/plots/encoder\_cka\_matrix\_*.png}: paired
+ \item \code{../dumps/power\_limited\_6\_pairwise\_10k/plots/encoder\_cka\_matrix\_*.png}: paired
        quantitative CKA comparison;
- \item \code{dumps/power\_limited\_6\_10k/plots/episode\_diagnostics\_*.png}: complete map, UMAP,
+ \item \code{../dumps/power\_limited\_6\_10k/plots/episode\_diagnostics\_*.png}: complete map, UMAP,
        latent-velocity, steering, and acceleration diagnostic;
- \item \code{dumps/power\_limited\_6\_10k/latents/}: raw 128-D latent CSV and NPZ dumps.
+ \item \code{../dumps/power\_limited\_6\_10k/latents/}: raw 128-D latent CSV and NPZ dumps.
 \end{itemize}
 To regenerate the figures after a run, execute \code{python -m driver.plot\_training}
 with the desired metrics path, then execute \code{python -m driver.analyze\_latent}

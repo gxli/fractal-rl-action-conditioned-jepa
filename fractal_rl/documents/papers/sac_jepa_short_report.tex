@@ -22,7 +22,7 @@ Figure~\ref{fig:terrain-hist} confirms this: whole-field potential histograms
 remain close, whereas same-seed spatial traces become smoother as $\alpha$ rises.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.96\linewidth]{dumps/sac_noim_analysis/terrain_value_histograms.png}
+\includegraphics[width=.96\linewidth]{../dumps/sac_noim_analysis/terrain_value_histograms.png}
 \caption{Terrain-value reference for the three current exponents, aggregated
 over four held-out seeds. Similar marginals result from standardizing intensity
 before $\phi=I^2$; offset traces expose the differing spatial scale.}
@@ -78,7 +78,7 @@ penalty by SIGReg ($c_{\rm reg}=.005$) or spherical MMD
 not silently folded into the completed three-arm result below.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.98\linewidth]{dumps/minstart_v2_analysis/three_arm_curves.png}
+\includegraphics[width=.98\linewidth]{../dumps/minstart_v2_analysis/three_arm_curves.png}
 \caption{Fresh global-minimum-start comparison. The source column includes
 all five completed source arms (SAC, JEPA, variance, SIGReg, spherical MMD).
 The two transfer columns presently contain the completed first three arms;
@@ -92,7 +92,7 @@ shared held-out terrain tiles and start locations, making the geometric effect
 of policy choices directly visible.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.94\linewidth,height=.68\textheight,keepaspectratio]{dumps/spectral_random_start_evaluation/random_start_trajectory_panels.png}
+\includegraphics[width=.94\linewidth,height=.68\textheight,keepaspectratio]{../dumps/spectral_random_start_evaluation/random_start_trajectory_panels.png}
 \caption{Representative deterministic terrain walks.  Adjacent SAC and
 SAC+JEPA trajectories use the same held-out tile and starting condition.}
 \end{figure}
@@ -129,13 +129,13 @@ yields $2.975\pm.066$, $3.018\pm.062$, and $2.987\pm.027$. These are one-run,
 four-held-out-seed standard deviations, not multi-seed confidence intervals.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.98\linewidth]{dumps/sac_noim_analysis/clean_noim_behavior.png}
+\includegraphics[width=.98\linewidth]{../dumps/sac_noim_analysis/clean_noim_behavior.png}
 \caption{Completed clean no-inverse/no-margin behavioural comparison. Shaded
 bands show held-out-seed standard deviations.}\label{fig:clean-behavior}
 \end{figure}
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.98\linewidth]{dumps/sac_noim_analysis/clean_noim_loss_terms.png}
+\includegraphics[width=.98\linewidth]{../dumps/sac_noim_analysis/clean_noim_loss_terms.png}
 \caption{Per-condition, exact logged optimization terms. Left: SAC actor
 term (solid) and total actor loss (dashed); middle: logged critic objective;
 right: weighted actor JEPA and logged variance terms. Inverse and action-margin
@@ -152,7 +152,7 @@ Moreover, the vanilla checkpoint is at 50k and clean JEPA at 20k transitions,
 so this matrix is not a controlled training-budget comparison.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.86\linewidth]{dumps/minstart_v2_analysis/three_arm_encoder_cka_blocks.png}
+\includegraphics[width=.86\linewidth]{../dumps/minstart_v2_analysis/three_arm_encoder_cka_blocks.png}
 \caption{Fresh three-run CKA decomposed into actor/$Q_1$/$Q_2$ blocks.}\label{fig:cka}
 \end{figure}
 
@@ -163,7 +163,7 @@ computed on one fixed minimum-start held-out observation sequence. This avoids
 mistaking separately sampled trajectories for representational drift.
 
 \begin{figure}[ht]\centering
-\includegraphics[width=.94\linewidth]{dumps/minstart_v2_analysis/sharing_temporal_cka.png}
+\includegraphics[width=.94\linewidth]{../dumps/minstart_v2_analysis/sharing_temporal_cka.png}
 \caption{Per-dump CKA already available from the encoder-sharing source sweep:
 actor--$Q_1$, actor--$Q_2$, and $Q_1$--$Q_2$ on fixed minimum-start held-out
 observations. The fully-shared run becomes unstable; critic-trained sharing
@@ -183,27 +183,27 @@ activations on identical observations; it is the appropriate encoder-relation
 measurement, whereas separate UMAPs show each encoder's own trajectory geometry.
 
 \begin{figure}[p]\centering
-\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_variance_010_frozen_a2/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{../dumps/sac_noim_variance_010_frozen_a2/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
 \caption{Frozen encoder, transfer to $\alpha=2$, variance regularization.}\label{fig:rep-a2-var}
 \end{figure}
 \begin{figure}[p]\centering
-\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_sigreg_005_frozen_a2/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{../dumps/sac_noim_sigreg_005_frozen_a2/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
 \caption{Frozen encoder, transfer to $\alpha=2$, SIGReg.}\label{fig:rep-a2-sig}
 \end{figure}
 \begin{figure}[p]\centering
-\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_spherical_mmd_010_frozen_a2/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{../dumps/sac_noim_spherical_mmd_010_frozen_a2/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
 \caption{Frozen encoder, transfer to $\alpha=2$, spherical MMD.}\label{fig:rep-a2-sph}
 \end{figure}
 \begin{figure}[p]\centering
-\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_variance_010_frozen_a35/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{../dumps/sac_noim_variance_010_frozen_a35/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
 \caption{Frozen encoder, transfer to $\alpha=3.5$, variance regularization.}\label{fig:rep-a35-var}
 \end{figure}
 \begin{figure}[p]\centering
-\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_sigreg_005_frozen_a35/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{../dumps/sac_noim_sigreg_005_frozen_a35/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
 \caption{Frozen encoder, transfer to $\alpha=3.5$, SIGReg.}\label{fig:rep-a35-sig}
 \end{figure}
 \begin{figure}[p]\centering
-\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{dumps/sac_noim_spherical_mmd_010_frozen_a35/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
+\includegraphics[width=.86\linewidth,height=.78\textheight,keepaspectratio]{../dumps/sac_noim_spherical_mmd_010_frozen_a35/analysis/actor_q_representation_panel_sac_000020000_seed100001.png}
 \caption{Frozen encoder, transfer to $\alpha=3.5$, spherical MMD.}\label{fig:rep-a35-sph}
 \end{figure}
 
@@ -240,15 +240,15 @@ stable; fully shared collapses at $\alpha=3.5$.
 
 \section{Verdict}
 \begin{figure}[ht]\centering
-\includegraphics[width=.98\linewidth]{dumps/minstart_v2_analysis/sharing_curves.png}
+\includegraphics[width=.98\linewidth]{../dumps/minstart_v2_analysis/sharing_curves.png}
 \caption{Completed encoder-sharing source and frozen-transfer comparison.}
 \end{figure}
 \begin{figure}[ht]\centering
-\includegraphics[width=.82\linewidth]{dumps/minstart_v2_analysis/freeze_ablation.png}
+\includegraphics[width=.82\linewidth]{../dumps/minstart_v2_analysis/freeze_ablation.png}
 \caption{Transfer freeze ablation: both encoders frozen versus critic frozen with actor encoder adaptation.}
 \end{figure}
 \begin{figure}[ht]\centering
-\includegraphics[width=.92\linewidth]{dumps/minstart_v2_analysis/five_arm_encoder_cka_blocks.png}
+\includegraphics[width=.92\linewidth]{../dumps/minstart_v2_analysis/five_arm_encoder_cka_blocks.png}
 \caption{Completed five-arm source CKA matrix, decomposed into $3\times3$ actor/$Q_1$/$Q_2$ blocks.}
 \end{figure}
 JEPA alone does not show a consistent gain over SAC: source endpoints occupy a
