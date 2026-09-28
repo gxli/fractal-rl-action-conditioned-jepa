@@ -5,6 +5,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
+from PIL import Image
 
 
 ROOT = Path('dumps')
@@ -65,12 +66,19 @@ def build_umap_evolution():
             fontsize=15,
         )
         stem = run.removeprefix('ar4k128_') + '_' + encoder
+        destination = OUT / f'k128_umap_evolution_{stem}.png'
         figure.savefig(
-            OUT / f'k128_umap_evolution_{stem}.png',
+            destination,
             dpi=180,
             facecolor='white',
             transparent=False,
         )
+        # The source diagnostics include alpha; flatten the report artifact to
+        # white so TeX/PDF renderers never display transparent regions as black.
+        with Image.open(destination) as image:
+            background = Image.new('RGB', image.size, 'white')
+            background.paste(image, mask=image.getchannel('A'))
+            background.save(destination)
         plt.close(figure)
 
 
