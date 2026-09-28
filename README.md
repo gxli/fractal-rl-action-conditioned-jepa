@@ -81,4 +81,4 @@ Research reports and their sources are available in [`fractal_rl/documents/`](fr
 
 ## License
 
-No license has been selected yet. Add a `LICENSE` file before publishing if you want others to be able to reuse the code.
+This project is licensed under the [Creative Commons Attribution 4.0 International License](../LICENSE). Reuse and adaptation are permitted with appropriate attribution.
